@@ -15,7 +15,7 @@ from .scaling import Dimensionalize
 from .scaling import nonDimensionalize as nd
 from .scaling import UnitRegistry as u
 from .lithopress import LithostaticPressure
-from ._utils import PressureSmoother, PassiveTracers
+from ._utils import PressureSmoother, PassiveTracers, PassiveTracersGrid
 from ._rheology import ViscosityLimiter, StressLimiter
 from ._material import Material
 from ._plots import Plots
@@ -1402,7 +1402,7 @@ class Model(Material):
         self._advector = _mesh_advector(self, axis)
 
     def add_passive_tracers(self, name, vertices=None,
-                            particleEscape=True):
+                            particleEscape=True, centroids=list()):
         """ Add a swarm of passive tracers to the Model
 
         Parameters:
@@ -1415,15 +1415,30 @@ class Model(Material):
                 Allow or prevent tracers from escaping the boundaries of the
                 Model (default to True)
         """
-        tracers = PassiveTracers(self.mesh,
-                                 self.velocityField,
-                                 name=name,
-                                 vertices=vertices,
-                                 particleEscape=particleEscape)
 
-        self.passive_tracers.append(tracers)
+        if not centroids:
+            tracers = PassiveTracers(self.mesh,
+                                     self.velocityField,
+                                     name=name,
+                                     vertices=vertices,
+                                     particleEscape=particleEscape)
 
-        setattr(self, name.lower() + "_tracers", tracers)
+            self.passive_tracers.append(tracers)
+
+            setattr(self, name.lower() + "_tracers", tracers)
+
+        else:
+
+            tracers = PassiveTracersGrid(self.mesh,
+                                         self.velocityField,
+                                         name=name,
+                                         vertices=vertices,
+                                         centroids=centroids,
+                                         particleEscape=particleEscape)
+            
+            self.passive_tracers.append(tracers)
+
+            setattr(self, name.lower() + "_tracers", tracers)
 
         return tracers
 
