@@ -6,6 +6,13 @@ except:
 import underworld.function as fn
 from scaling import nonDimensionalize as nd
 
+import numpy as np
+from scipy.linalg import solve as linSolve
+import scipy.signal as sig
+from scipy.interpolate import interp1d
+from mpi4py import MPI
+comm = MPI.COMM_WORLD
+CPUsize = comm.Get_size()
 
 class SurfaceProcesses(object):
 
