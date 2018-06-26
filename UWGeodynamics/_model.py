@@ -1405,7 +1405,7 @@ class Model(Material):
 
             if uw.rank() == 0:
                 sys.__stdout__.write(
-                        """Non linear solver - Residual {2:.8e}; Tolerance {3:.8e}""".format(
+                        """Non linear solver - Residual {0:.8e}; Tolerance {1:.8e}""".format(
                             residual, self._curTolerance))
 
             converged = False
