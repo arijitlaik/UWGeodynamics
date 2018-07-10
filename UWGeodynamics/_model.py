@@ -1,17 +1,16 @@
 from __future__ import print_function
 import os
-import sys
 import json
 import json_encoder
-from collections import Iterable
 from collections import OrderedDict
 import numpy as np
 import underworld as uw
 import underworld.function as fn
+from underworld.function.exception import SafeMaths as Safe
 import UWGeodynamics.shapes as shapes
 import UWGeodynamics.surfaceProcesses as surfaceProcesses
 from . import scaling_coefficients
-from . import rcParams, uwgeodynamics_fname
+from . import rcParams
 from .scaling import Dimensionalize
 from .scaling import nonDimensionalize as nd
 from .scaling import UnitRegistry as u
@@ -32,9 +31,6 @@ from ._swarmvariable import SwarmVariable
 from scipy import interpolate
 from six import string_types, iteritems
 from datetime import datetime
-from mpi4py import MPI
-
-comm = MPI.COMM_WORLD
 
 
 class Model(Material):
@@ -152,7 +148,6 @@ class Model(Material):
         self.swarm_fields = {}
 
         # Add common mesh variables
-        # Temperature Field is initialised to None
         self.temperature = None
         self.add_submesh_field("pressureField", nodeDofCount=1)
         self.add_mesh_field("velocityField", nodeDofCount=self.mesh.dim)
@@ -268,6 +263,7 @@ class Model(Material):
         self.add_swarm_field("meltField", dataType="double", count=1)
         self.add_swarm_field("timeField", dataType="double", count=1)
         self.timeField.data[...] = 0.0
+        self.materialField.data[...] = self.index
 
         if self.mesh.dim == 3:
             stress_dim = 6
@@ -276,8 +272,10 @@ class Model(Material):
 
         self.add_swarm_field("_previousStressField", dataType="double",
                              count=stress_dim)
+        self.add_swarm_field("_stressTensor", dataType="double",
+                             count=stress_dim, projected="submesh")
         self.add_swarm_field("_stressField", dataType="double",
-                             count=stress_dim)
+                             count=1, projected="submesh")
 
         #self._add_surface_tracers()
 
@@ -286,7 +284,6 @@ class Model(Material):
 
     def _repr_html_(self):
         return _model_html_repr(self)
-
 
     @property
     def x(self):
@@ -336,8 +333,8 @@ class Model(Material):
 
         if step is None:
             indices = [int(os.path.splitext(filename)[0].split("-")[-1])
-                    for filename in os.listdir(restartDir) if "-" in
-                    filename]
+                       for filename in os.listdir(restartDir) if "-" in
+                       filename]
 
             if indices:
                 step = max(indices) - 1
@@ -351,9 +348,9 @@ class Model(Material):
             self.time = u.Quantity(h5f.attrs.get("time"))
 
         if uw.rank() == 0:
-            print(80*"="+"\n")
+            print(80 * "=" + "\n")
             print("Restarting Model from Step {0} at Time = {1}\n".format(step, self.time))
-            print(80*"="+"\n")
+            print(80 * "=" + "\n")
 
         self.checkpointID = step
         self.mesh.load(os.path.join(restartDir, "mesh.h5"))
@@ -418,7 +415,7 @@ class Model(Material):
 
             # Parse xmf for the last timestep time
             import xml.etree.ElementTree as etree
-            xmf = restartFolder+"/xmf/tin.time"+str(restartStep)+".xmf"
+            xmf = restartFolder + "/xmf/tin.time" + str(restartStep) + ".xmf"
             tree = etree.parse(xmf)
             root = tree.getroot()
             badlands_time = float(root[0][0][0].attrib["Value"])
@@ -442,8 +439,7 @@ class Model(Material):
                 XML, resolution,
                 checkpoint_interval,
                 restartFolder=restartFolder,
-                restartStep=restartStep
-                )
+                restartStep=restartStep)
 
         return
 
@@ -489,9 +485,17 @@ class Model(Material):
         return self._viscosityField
 
     @property
-    def projStressField(self):
+    def projStressTensor(self):
         """ Stress Tensor on mesh """
-        self._stressField.data[...] = self._stressFn.evaluate(self.swarm)
+        self._stressTensor.data[...] = self._stressFn.evaluate(self.swarm)
+        self._stressTensorProjector.solve()
+        return self._projStressTensor
+
+    @property
+    def projStressField(self):
+        """ Second Invariant of the Stress tensor projected on the submesh"""
+        stress = fn.tensor.second_invariant(self._stressFn)
+        self._stressField.data[...] = stress.evaluate(self.swarm)
         self._stressFieldProjector.solve()
         return self._projStressField
 
@@ -668,6 +672,7 @@ class Model(Material):
 
         gravity = tuple([nd(val) for val in self.gravity])
         self._buoyancyFn = self._densityFn * gravity
+        self._buoyancyFn = Safe(self._buoyancyFn)
 
         if any([material.viscosity for material in self.materials]):
 
@@ -689,6 +694,12 @@ class Model(Material):
 
             if rcParams["mg.levels"]:
                 self._solver.options.mg.levels = rcParams["mg.levels"]
+
+        if self._solver._check_linearity(False):
+            if not hasattr(self, "prevVelocityField"):
+                self.add_mesh_field("prevVelocityField", nodeDofCount=self.mesh.dim)
+            if not hasattr(self, "prevPressureField"):
+                self.add_submesh_field("prevPressureField", nodeDofCount=1)
 
         return self._solver
 
@@ -750,8 +761,7 @@ class Model(Material):
             raise ValueError("Set Boundary Conditions")
         return self.velocityBCs.get_conditions()
 
-    def add_material(self, material=None, shape=None, name="unknown",
-                     reset=False, fill=True):
+    def add_material(self, shape=None, name="unknown", fill=True, reset=False):
         """ Add Material to the Model
 
         Parameters:
@@ -766,27 +776,22 @@ class Model(Material):
             reset: (bool)
                 Reset the material Field before adding the new
                 material. Default is False.
+
         """
 
         if reset:
-            self.materialField.data[...] = 0
-            self.materials = [self]
+            self.materialField.data[:] = self.index
 
-        if material is not None:
-            mat = material
-            mat.name = name
-        else:
-            mat = Material()
+        mat = Material()
+        mat.name = name
 
-            mat.name = name
+        mat.diffusivity = self.diffusivity
+        mat.capacity = self.capacity
+        mat.radiogenicHeatProd = self.radiogenicHeatProd
 
-            # Initialize some properties to Model property
-            mat.diffusivity = self.diffusivity
-            mat.capacity = self.capacity
-            mat.radiogenicHeatProd = self.radiogenicHeatProd
-
-        if isinstance(shape, shapes.Layer):
+        if hasattr(shape, "top"):
             mat.top = shape.top
+        if hasattr(shape, "bottom"):
             mat.bottom = shape.bottom
 
             if self.mesh.dim == 3:
@@ -799,8 +804,10 @@ class Model(Material):
         self.materials.append(mat)
         self.materials.reverse()
 
-        if fill:
-            self._fill_model()
+        if mat.shape:
+            condition = [(mat.shape.fn, mat.index), (True, self.materialField)]
+            func = fn.branching.conditional(condition)
+            self.materialField.data[:] = func.evaluate(self.swarm)
 
         return mat
 
@@ -815,7 +822,7 @@ class Model(Material):
         self.materialField.data[:] = vals
 
     def add_swarm_field(self, name, dataType="double", count=1,
-                        init_value=0., **kwargs):
+                        init_value=0., projected="mesh", **kwargs):
         newField = self.swarm.add_variable(dataType, count, **kwargs)
         setattr(self, name, newField)
         newField.data[...] = init_value
@@ -826,9 +833,17 @@ class Model(Material):
             proj_name = "_proj" + name[1].upper() + name[2:]
         else:
             proj_name = "_proj" + name[0].upper() + name[1:]
-        projected = self.add_mesh_field(proj_name, nodeDofCount=count,
-                                        dataType="double")
-        # Create a projector
+
+        if projected == "mesh":
+            projected = self.add_mesh_field(proj_name,
+                                            nodeDofCount=count,
+                                            dataType="double")
+        else:
+            projected = self.add_submesh_field(proj_name,
+                                               nodeDofCount=count,
+                                               dataType="double")
+
+        # Create a projector 
         if name.startswith("_"):
             projector_name = name + "Projector"
         else:
@@ -854,6 +869,7 @@ class Model(Material):
         setattr(self, name, newField)
         newField.data[...] = init_value
         self.submesh_fields[name] = newField
+        return newField
 
     @property
     def _densityFn(self):
@@ -871,8 +887,8 @@ class Model(Material):
 
             if material.meltExpansion:
                 fact = material.meltExpansion * self.meltField
-                densityMap[material.index] = (densityMap[material.index] *
-                                              (1.0 - fact))
+                densityMap[material.index] = (
+                    densityMap[material.index] * (1.0 - fact))
 
         return fn.branching.map(fn_key=self.materialField, mapping=densityMap)
 
@@ -1107,7 +1123,7 @@ class Model(Material):
         else:
             self._isYielding = fn.misc.constant(0.0)
 
-        return viscosityFn
+        return Safe(viscosityFn)
 
     @property
     def _stressFn(self):
@@ -1140,8 +1156,8 @@ class Model(Material):
                     # has no elasticity
                     elasticStressFn = [0.0] * 3 if self.mesh.dim == 2 else [0.0] * 6
                 stressMap[material.index] = elasticStressFn
-            return fn.branching.map(fn_key=self.materialField,
-                                    mapping=stressMap)
+            return Safe(fn.branching.map(fn_key=self.materialField,
+                                    mapping=stressMap))
         else:
 
             elasticStressFn = [0.0] * 3 if self.mesh.dim == 2 else [0.0] * 6
@@ -1233,7 +1249,7 @@ class Model(Material):
             at the bottom of the Model
         """
 
-        gravity = np.abs(nd(self.gravity[-1]))  # Ugly!!!!!
+        gravity = np.abs(nd(self.gravity[-1]))
         lithoPress = LithostaticPressure(self.mesh, self._densityFn, gravity)
         self.pressureField.data[:], LPressBot = lithoPress.solve()
         self.pressSmoother.smooth()
@@ -1265,12 +1281,11 @@ class Model(Material):
 
         self._solution_exist.value = True
 
-        # The following line are useful to output velocity and pressurefield
-        # from the non-linear loop.
-        #niteration = self._stokes_SLE._cself.nonLinearIteration_I
-        #string = str(self.step) + "-" + str(niteration)
-        #self._save_fields(["velocityField", "pressureField"], checkpointID=string,
-        #                  time=niteration)
+    def _apply_alpha(self):
+
+        self.velocityField.data[...] *= (1.0 - rcParams["alpha"])
+        self.velocityField.data[...] += rcParams["alpha"] * self.prevVelocityField.data[...]
+        self.velocityField.syncronise()
 
     def _get_material_indices(self, material):
         """ Get mesh indices of a Material
@@ -1325,110 +1340,6 @@ class Model(Material):
 
         self._solution_exist.value = True
 
-    def _solve_tempo(self):
-
-        solver = self.stokes_solver()
-
-        if solver._check_linearity(False):
-            if self.step == 0:
-                self.add_mesh_field("prevVelocityField", nodeDofCount=self.mesh.dim)
-                self.add_submesh_field("prevPressureField", nodeDofCount=1)
-            self._nonLinearSolve()
-
-        else:
-            self.stokes_solver().solve()
-
-        return
-
-    def _nonLinearSolve(self):
-
-        if self.step == 0:
-            self._curTolerance = rcParams["initial.nonlinear.tolerance"]
-            minIterations = rcParams["initial.nonlinear.min.iterations"]
-            maxIterations = rcParams["initial.nonlinear.max.iterations"]
-        else:
-            self._curTolerance = rcParams["nonlinear.tolerance"]
-            minIterations = rcParams["nonlinear.min.iterations"]
-            maxIterations = rcParams["nonlinear.max.iterations"]
-
-        it = 0
-        self.stokes_solver().solve(nonLinearIterate=False)
-        it += 1
-
-        while it < maxIterations:
-
-            if uw.rank() == 0:
-                print("non-linear solver - iteration {0}\n".format(it), file=open('/dev/stdout', 'w'))
-
-            self.prevVelocityField.data[...] = self.velocityField.data[...]
-            self.prevPressureField.data[...] = self.pressureField.data[...]
-            self.stokes_solver().solve(nonLinearIterate=False)
-            self._callback_post_solve()
-
-
-            ## Calculate L2-Norm of current velocity Field
-            #vdot = fn.math.dot(self.velocityField, self.velocityField)
-            #vint = uw.utils.Integral(vdot, self.mesh)
-            #vL2 = np.sqrt(vint.evaluate()[0])
-
-            ## Calculate L2-Norm of delta velocity
-            #dV = self.velocityField - self.prevVelocityField
-            #vdot = fn.math.dot(dV, dV)
-            #vint = uw.utils.Integral(vdot, self.mesh)
-            #dVL2 = np.sqrt(vint.evaluate()[0])
-
-            ## Calculate L2-Norm of current dynamic pressure
-            #pdot = fn.math.dot(self.pressureField, self.pressureField)
-            #pint = uw.utils.Integral(pdot, self.mesh)
-            #pL2 = np.sqrt(pint.evaluate()[0])
-
-            ## Calculate L2-Norm of delta pressure
-            #dP = self.pressureField - self.prevPressureField
-            #dPdot = fn.math.dot(dP, dP)
-            #pint = uw.utils.Integral(dPdot, self.mesh)
-            #dPL2 = np.sqrt(pint.evaluate()[0])
-
-            # Full norm of the velocity and pressure
-            xdot = (fn.math.dot(self.velocityField, self.velocityField) +
-                    fn.math.dot(self.pressureField, self.pressureField))
-            xint = uw.utils.Integral(xdot, self.mesh)
-            xL2  = np.sqrt(xint.evaluate()[0])
-
-            # Full norm of the change in velocity and pressure
-            dV = self.velocityField - self.prevVelocityField
-            dP = self.pressureField - self.prevPressureField
-            xdot = fn.math.dot(dV, dV) + fn.math.dot(dP, dP)
-            xint = uw.utils.Integral(xdot, self.mesh)
-            dxL2 = np.sqrt(xint.evaluate()[0])
-
-            residual = abs(dxL2 / xL2)
-
-            if uw.rank() == 0:
-                sys.__stdout__.write(
-                        """Non linear solver - Residual {0:.8e}; Tolerance {1:.8e}""".format(
-                            residual, self._curTolerance))
-
-            converged = False
-            if residual < self._curTolerance and it > minIterations:
-                converged = True
-
-            if converged:
-                if uw.rank() == 0:
-                    sys.__stdout__.write(" - converged - \n")
-                    sys.__stdout__.flush()
-                break
-            else:
-                if uw.rank() == 0:
-                    sys.__stdout__.write(" - not converged - \n")
-                    sys.__stdout__.flush()
-
-
-            #self.velocityField.data[...] *= (1.0 - rcParams["alpha"])
-            #self.velocityField.data[...] += rcParams["alpha"] * self.prevVelocityField.data[...]
-            #self.velocityField.syncronise()
-
-            it += 1
-
     def init_model(self, temperature=True, pressureField=True):
         """ Initialize the Temperature Field as steady state,
             Initialize the Pressure Field as Lithostatic
@@ -1463,7 +1374,10 @@ class Model(Material):
             glucifer_outputs: output glucifer figures [False]
         """
 
-        if uw.rank()==0 and not os.path.exists(self.outputDir):
+        if uw.rank() == 0:
+            print("""Running with UWGeodynamics version {0}""".format(full_version))
+
+        if uw.rank() == 0 and not os.path.exists(self.outputDir):
             os.mkdir(self.outputDir)
         uw.barrier()
 
@@ -1507,7 +1421,7 @@ class Model(Material):
 
             self.preSolveHook()
 
-            self._solve_tempo()
+            self.solve()
 
             # Whats the longest we can run before reaching the end
             # of the model or a checkpoint?
@@ -1559,7 +1473,7 @@ class Model(Material):
                     print("Step:" + str(stepDone) + " Model Time: ", str(self.time.to(units)),
                           'dt:', str(Dimensionalize(self._dt, units)),
                           #'vrms:', str(self.velocity_rms()),
-                          '('+datetime.now().strftime('%Y-%m-%d %H:%M:%S')+')')
+                          '(' + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + ')')
 
             self.postSolveHook()
 
@@ -1584,7 +1498,6 @@ class Model(Material):
                 self._calibrate_pressureField()
             #self._adjust_tolerance()
         self._callback_post_solve = callback
-
 
     def _update(self):
         """ Update Function
@@ -1651,7 +1564,6 @@ class Model(Material):
 
         if self._visugrid:
             self._visugrid.advect(dt)
-
 
     def mesh_advector(self, axis):
         """ Initialize the mesh advector
@@ -1772,9 +1684,9 @@ class Model(Material):
                 if material.compressibility:
                     materialMap[material.index] = nd(material.compressibility)
 
-            return uw.function.branching.map(fn_key=self.materialField,
+            return Safe(uw.function.branching.map(fn_key=self.materialField,
                                              mapping=materialMap,
-                                             fn_default=0.0)
+                                             fn_default=0.0))
         return
 
     def checkpoint(self, variables=None, checkpointID=None):
@@ -1819,8 +1731,8 @@ class Model(Material):
            field not in rcParams["swarm.variables"]):
             raise ValueError("""{0} is not a valid field, \n
                                 Valid fields are {1} or {2}""".format(
-                                    field, rcParams["mesh.variables"],
-                                    rcParams["swarm.variables"]))
+                             field, rcParams["mesh.variables"],
+                             rcParams["swarm.variables"]))
 
         start_point = np.array([nd(val) for val in start_point])
         end_point = np.array([nd(val) for val in end_point])
@@ -1900,49 +1812,6 @@ class Model(Material):
         self._visugrid = Visugrid(self, elementRes, minCoord, maxCoord,
                                   self.velocityField)
 
-    def _save_field(self, field, checkpointID, units=None):
-        """ Save Field """
-
-        if field in rcParams["mesh.variables"]:
-            if not units:
-                try:
-                    units = rcParams[field + ".SIunits"]
-                except KeyError:
-                    units = None
-
-            if self._advector:
-                mesh_name = 'mesh-%s' % checkpointID
-                mesh_prefix = os.path.join(self.outputDir, mesh_name)
-            else:
-                mesh_name = 'mesh'
-                mesh_prefix = os.path.join(self.outputDir, mesh_name)
-
-            mH = self.mesh.save('%s.h5' % mesh_prefix, units=u.kilometers,
-                                time=self.time)
-            file_prefix = os.path.join(self.outputDir, field + '-%s' % checkpointID)
-            obj = getattr(self, field)
-            handle = obj.save('%s.h5' % file_prefix, units=units, time=self.time)
-            obj.xdmf('%s.xdmf' % file_prefix, handle, field, mH, mesh_name,
-                     modeltime=self.time.magnitude)
-
-        elif field in rcParams["swarm.variables"]:
-            if not units:
-                try:
-                    units = rcParams[field + ".SIunits"]
-                except KeyError:
-                    units = None
-
-            sH = self.swarm.save(os.path.join(self.outputDir,
-                                 'swarm-%s.h5' % checkpointID),
-                                 units=u.kilometers, time=self.time)
-            file_prefix = os.path.join(self.outputDir,
-                                       field + '-%s' % checkpointID)
-            obj = getattr(self, field)
-            handle = obj.save('%s.h5' % file_prefix, units=units, time=self.time)
-            obj.xdmf('%s.xdmf' % file_prefix, handle, field, sH, 'swarm',
-                     modeltime=self.time.magnitude)
-        else:
-            raise ValueError(field, ' is not a valid variable name \n')
 
     def _save_fields(self, fields, checkpointID, time=None):
 
@@ -1958,7 +1827,7 @@ class Model(Material):
         mH = self.mesh.save('%s.h5' % mesh_prefix, units=u.kilometers,
                             time=time)
 
-        filename = "XDMF.fields."+str(checkpointID).zfill(5)+".xmf"
+        filename = "XDMF.fields." + str(checkpointID).zfill(5) + ".xmf"
         filename = os.path.join(self.outputDir, filename)
 
         # First write the XDMF header
@@ -2002,7 +1871,7 @@ class Model(Material):
                              units=u.kilometers,
                              time=time)
 
-        filename = "XDMF.swarms."+str(checkpointID).zfill(5)+".xmf"
+        filename = "XDMF.swarms." + str(checkpointID).zfill(5) + ".xmf"
         filename = os.path.join(self.outputDir, filename)
 
         # First write the XDMF header
@@ -2040,7 +1909,7 @@ class Model(Material):
         from ._utils import MoveImporter
         Importer = MoveImporter(filename, units=units)
 
-        shape_dict = {name: []  for name in Importer.names}
+        shape_dict = {name: [] for name in Importer.names}
 
         for polygon in Importer.generator:
             name = polygon["properties"]["Name"]
@@ -2072,7 +1941,7 @@ class Model(Material):
         fn_2_integrate = (1., vdotv_fn)
         (v2, vol) = self.mesh.integrate(fn=fn_2_integrate)
         import math
-        vrms = math.sqrt(v2/vol)
+        vrms = math.sqrt(v2 / vol)
         #os.write(1, "Velocity rms (vrms): {0}".format(vrms))
         return vrms
 
@@ -2084,6 +1953,7 @@ def save_model(model, filename):
     path = os.path.join(model.outputDir, filename)
     with open(path, "w") as f:
         json.dump(model, f, sort_keys=True, indent=4, cls=json_encoder.ObjectEncoder)
+
 
 def load_model(filename, step=None):
     """ Reload Model from json file """

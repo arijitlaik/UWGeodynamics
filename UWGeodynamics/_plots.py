@@ -254,10 +254,39 @@ class Plots(object):
 
         return Fig
 
+    def stressField(self, figsize=None, title="Stress Field",
+                    units=u.pascal, cullface=False,
+                    script=None, show=True, quality=3,
+                    store=None, visugrid=None, **kwargs):
+
+        Fig = glucifer.Figure(store=store, figsize=figsize,
+                              quality=quality,
+                              min=self._boundingBox[0],
+                              max=self._boundingBox[1])
+        Fig["title"] = title + " " + str(units)
+        Fig["boundingBox"] = self._boundingBox
+
+        fact = Dimensionalize(1.0, units).magnitude
+        Fig.Surface(self.Model.mesh, self.Model.projStressField * fact,
+                    cullface=cullface, name=Fig["title"], **kwargs)
+        if visugrid:
+            clip_X, clip_Y = _visugrid_drawing_object(self.Model, visugrid)
+            Fig.Mesh(visugrid.mesh, xmin=clip_X[0], xmax=clip_X[1],
+                     ymin=clip_Y[0], ymax=clip_Y[1])
+
+        Fig.script(script)
+        if show and glucifer.lavavu.is_notebook():
+            Fig.show()
+
+        return Fig
+
     def velocityField(self, figsize=None, title="Velocity Field",
                       units=u.centimeter / u.year, cullface=False,
                       script=None, show=True, quality=3,
-                      store=None, visugrid=None, **kwargs):
+                      store=None, colours='diverge', visugrid=None,
+                      arrowlength=0.0,
+                      arrownorm=1.0,
+                      arrowres=(16,16,16), **kwargs):
 
         Fig = glucifer.Figure(store=store, figsize=figsize,
                               quality=quality,
@@ -270,9 +299,13 @@ class Plots(object):
         velmagfield = uw.function.math.sqrt(
             uw.function.math.dot(self.Model.velocityField,
                                  self.Model.velocityField))
-        Fig.Surface(self.Model.mesh, velmagfield * fact,
-                    cullface=cullface, name=Fig["title"], **kwargs)
-        Fig.VectorArrows(self.Model.mesh, self.Model.velocityField,
+        Fig.Surface(self.Model.mesh, velmagfield * fact,colours=colours,
+                   cullface=cullface, name=Fig["title"], **kwargs)
+        Fig.VectorArrows(self.Model.mesh,
+                         self.Model.velocityField,
+                         length=arrowlength,
+                         normalise=arrownorm,
+                         resolution=arrowres,
                          **kwargs)
         if visugrid:
             clip_X, clip_Y = _visugrid_drawing_object(self.Model, visugrid)
