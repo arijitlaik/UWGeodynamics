@@ -1,7 +1,9 @@
 from __future__ import print_function
 import os
+import sys
 import json
 import json_encoder
+from collections import Iterable
 from collections import OrderedDict
 import numpy as np
 import underworld as uw
@@ -24,10 +26,10 @@ from ._velocity_boundaries import VelocityBCs
 from ._thermal_boundaries import TemperatureBCs
 from ._mesh_advector import _mesh_advector
 from ._frictional_boundary import FrictionBoundaries
-from ._mesh import FeMesh_Cartesian
-from ._swarm import Swarm
-from ._meshvariable import MeshVariable
-from ._swarmvariable import SwarmVariable
+from .Underworld_extended import FeMesh_Cartesian
+from .Underworld_extended import Swarm
+from .Underworld_extended import MeshVariable
+from .Underworld_extended import SwarmVariable
 from scipy import interpolate
 from six import string_types, iteritems
 from datetime import datetime
@@ -789,6 +791,12 @@ class Model(Material):
         mat.capacity = self.capacity
         mat.radiogenicHeatProd = self.radiogenicHeatProd
 
+        if isinstance(shape, shapes.Layer):
+            if self.mesh.dim == 2:
+                shape = shapes.Layer2D(top=shape.top, bottom=shape.bottom)
+            if self.mesh.dim == 3:
+                shape = shapes.Layer3D(top=shape.top, bottom=shape.bottom)
+
         if hasattr(shape, "top"):
             mat.top = shape.top
         if hasattr(shape, "bottom"):
@@ -843,7 +851,7 @@ class Model(Material):
                                                nodeDofCount=count,
                                                dataType="double")
 
-        # Create a projector 
+        # Create a projector
         if name.startswith("_"):
             projector_name = name + "Projector"
         else:
@@ -1196,8 +1204,11 @@ class Model(Material):
                 if material.diffusivity:
                     DiffusivityMap[material.index] = nd(material.diffusivity)
 
-            self.DiffusivityFn = fn.branching.map(fn_key=self.materialField,
-                                                  mapping=DiffusivityMap)
+            self.DiffusivityFn = fn.branching.map(
+                fn_key=self.materialField,
+                mapping=DiffusivityMap,
+                fn_default=nd(self.diffusivity)
+            )
 
             HeatProdMap = {}
             for material in self.materials:
@@ -1311,7 +1322,21 @@ class Model(Material):
                                        fromObject=nodes)
 
     def solve(self):
-        """ Solve Stokes """
+
+        solver = self.stokes_solver()
+
+        if solver._check_linearity(False):
+            if self.step == 0:
+                self.add_mesh_field("prevVelocityField", nodeDofCount=self.mesh.dim)
+                self.add_submesh_field("prevPressureField", nodeDofCount=1)
+            self._nonLinearSolve()
+
+        else:
+            self.stokes_solver().solve()
+
+        return
+
+    def _nonLinearSolve(self):
 
         if self.step == 0:
             self._curTolerance = rcParams["initial.nonlinear.tolerance"]
@@ -1322,23 +1347,55 @@ class Model(Material):
             minIterations = rcParams["nonlinear.min.iterations"]
             maxIterations = rcParams["nonlinear.max.iterations"]
 
-        if uw.__version__.split(".")[1] > 5:
-            # The minimum number of iteration only works with version 2.6
-            # 2.6 is still in development...
-            self.stokes_solver().solve(
-                nonLinearIterate=True,
-                nonLinearMinIterations=minIterations,
-                nonLinearMaxIterations=maxIterations,
-                callback_post_solve=self.callback_post_solve,
-                nonLinearTolerance=self._curTolerance)
-        else:
-            self.stokes_solver().solve(
-                nonLinearIterate=True,
-                nonLinearMaxIterations=maxIterations,
-                callback_post_solve=self.callback_post_solve,
-                nonLinearTolerance=self._curTolerance)
+        it = 0
+        self.stokes_solver().solve(nonLinearIterate=False)
+        it += 1
 
-        self._solution_exist.value = True
+        while it < maxIterations:
+
+            if uw.rank() == 0:
+                print("non-linear solver - iteration {0}\n".format(it), file=open('/dev/stdout', 'w'))
+
+            self.prevVelocityField.data[...] = self.velocityField.data[...]
+            self.prevPressureField.data[...] = self.pressureField.data[...]
+            self.stokes_solver().solve(nonLinearIterate=False)
+            self._callback_post_solve()
+
+            # Full norm of the velocity and pressure
+            xdot = (fn.math.dot(self.velocityField, self.velocityField) +
+                    fn.math.dot(self.pressureField, self.pressureField))
+            xint = uw.utils.Integral(xdot, self.mesh)
+            xL2  = np.sqrt(xint.evaluate()[0])
+
+            # Full norm of the change in velocity and pressure
+            dV = self.velocityField - self.prevVelocityField
+            dP = self.pressureField - self.prevPressureField
+            xdot = fn.math.dot(dV, dV) + fn.math.dot(dP, dP)
+            xint = uw.utils.Integral(xdot, self.mesh)
+            dxL2 = np.sqrt(xint.evaluate()[0])
+
+            residual = abs(dxL2 / xL2)
+
+            if uw.rank() == 0:
+                sys.__stdout__.write(
+                        """Non linear solver - Residual {0:.8e}; Tolerance {1:.8e}""".format(
+                            residual, self._curTolerance))
+
+            converged = False
+            if residual < self._curTolerance and it > minIterations:
+                converged = True
+
+            if converged:
+                if uw.rank() == 0:
+                    sys.__stdout__.write(" - converged - \n")
+                    sys.__stdout__.flush()
+                break
+            else:
+                if uw.rank() == 0:
+                    sys.__stdout__.write(" - not converged - \n")
+                    sys.__stdout__.flush()
+
+            it += 1
 
     def init_model(self, temperature=True, pressureField=True):
         """ Initialize the Temperature Field as steady state,
