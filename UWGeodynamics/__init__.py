@@ -1,12 +1,33 @@
-from __future__ import print_function
+from __future__ import print_function,  absolute_import
 import warnings
-warnings.filterwarnings("ignore")
 
 try:
     import underworld
+    uw = underworld
 except ImportError:
     raise ImportError("Can not find Underworld, please check your installation")
 
+try:
+    from uw.scaling import get_coefficients
+    from uw.scaling import units as UnitRegistry
+    from uw.scaling import non_dimensionalise
+    from uw.scaling import dimensionalise
+
+except ImportError:
+
+    # Fall back to local submodule if the underworld version
+    # does not have the scaling
+    from .scaling import get_coefficients
+    from .scaling import units as UnitRegistry
+    from .scaling import non_dimensionalise
+    from .scaling import dimensionalise
+
+scaling_coefficients = get_coefficients()
+nd = non_dimensionalise
+dim = dimensionalise
+u = UnitRegistry
+
+import glucifer
 import sys
 import os
 import errno
@@ -15,43 +36,58 @@ import locale
 import uuid as _uuid
 from itertools import chain
 import six
-import shapes
-import surfaceProcesses
-import utilities
+from mpi4py import MPI as _MPI
+from . import shapes
+from . import surfaceProcesses
+from . import utilities
 from ._rcParams import rcParams as defaultParams
-from .scaling import COEFFICIENTS as scaling_coefficients
-from .scaling import UnitRegistry
-from .scaling import nonDimensionalize
-from .scaling import Dimensionalize
 from .LecodeIsostasy import LecodeIsostasy
-from .lithopress import LithostaticPressure
-from ._rheology import Rheology, ConstantViscosity, ViscousCreep, DruckerPrager
-from ._rheology import VonMises, CompositeViscosity
+from .lithopress import Lithostatic_pressure
+from ._rheology import Rheology, ConstantViscosity, ViscousCreep
+from ._rheology import DruckerPrager, VonMises
+from ._rheology import CompositeViscosity
 from ._rheology import ViscousCreepRegistry, PlasticityRegistry
 from ._rheology import Elasticity
-from ._material import Material
+from ._material import Material, MaterialRegistry
 from ._density import ConstantDensity, LinearDensity
 from ._melt import Solidus, Liquidus, SolidusRegistry, LiquidusRegistry
-from ._utils import Balanced_InflowOutflow, MoveImporter
+from ._utils import Balanced_InflowOutflow
 from ._utils import circles_grid, fn_Tukey_window, circle_points_tracers, sphere_points_tracers
-from ._utils import LogFile
 from ._utils import MovingWall
 from ._utils import PhaseChange, WaterFill
+from ._utils import extract_profile
 from .version import full_version as __version__
 from .version import git_revision as __git_revision__
-import _net
+from . import _net
+from . import postprocessing
+
+comm = _MPI.COMM_WORLD
+rank = comm.rank
+size = comm.size
+nProcs = size
 
 __author__ = "Romain Beucher"
+__copyright__ = "Copyright 2018, The University of Melbourne"
+__credits__ = ["Romain Beucher",
+               "Louis Moresi",
+               "Julian Giordani",
+               "John Mansour"]
+__maintainer__ = "Romain Beucher"
+__email__ = "romain.beucher@unimelb.edu.au"
 
 _id = str(_uuid.uuid4())
 
-uw = underworld
-nd = nonDimensionalize
-u = UnitRegistry
 
-rheologies = ViscousCreepRegistry()
-yieldCriteria = PlasticityRegistry()
-scaling = scaling_coefficients
+def Dimensionalize(*args, **kwargs):
+    import warnings
+    warnings.warn("""'Dimensionalize' has been changed to 'dimensionalise', please use the later""")
+    return dimensionalise(*args, **kwargs)
+
+
+def nonDimensionalize(*args, **kwargs):
+    import warnings
+    warnings.warn("""'nonDimensionalize' has been changed to 'non_dimensionalise', please use the later""")
+    return non_dimensionalise(*args, **kwargs)
 
 
 def mkdirs(newdir, mode=0o777):
@@ -71,6 +107,7 @@ def mkdirs(newdir, mode=0o777):
         except OSError as exception:
             if exception.errno != errno.EEXIST:
                 raise
+
 
 def _is_writable_dir(p):
     """
@@ -318,6 +355,9 @@ _deprecated_map = {
 _deprecated_ignore_map = {
     }
 
+_deprecated_abort = {"solver": "Model.solver.set_inner_method()",
+                     "penalty": "Model.solver.set_penalty()"}
+
 _obsolete_set = set()
 _all_deprecated = set(chain(_deprecated_ignore_map,
                             _deprecated_map, _obsolete_set))
@@ -332,14 +372,14 @@ class RcParams(dict):
     """
 
     validate = dict((key, converter) for key, (default, converter) in
-                    six.iteritems(defaultParams)
+                    defaultParams.items()
                     if key not in _all_deprecated)
     msg_depr = "%s is deprecated and replaced with %s; please use the latter."
     msg_depr_ignore = "%s is deprecated and ignored. Use %s"
 
     # validate values on the way in
     def __init__(self, *args, **kwargs):
-        for k, v in six.iteritems(dict(*args, **kwargs)):
+        for k, v in dict(*args, **kwargs).items():
             self[k] = v
 
     def __setitem__(self, key, val):
@@ -353,6 +393,9 @@ class RcParams(dict):
                 alt = _deprecated_ignore_map[key]
                 warnings.warn(self.msg_depr_ignore % (key, alt))
                 return
+            elif key in _deprecated_abort:
+                alt = _deprecated_abort[key]
+                raise ValueError(self.msg_depr % (key, alt))
             try:
                 cval = self.validate[key](val)
             except ValueError as ve:
@@ -373,6 +416,9 @@ See rcParams.keys() for a list of valid parameters.' % (key,))
             alt = _deprecated_ignore_map[key]
             warnings.warn(self.msg_depr_ignore % (key, alt))
             key = alt
+        elif key in _deprecated_abort:
+            alt = _deprecated_abort[key]
+            raise ValueError(self.msg_depr % (key, alt))
 
         val = dict.__getitem__(self, key)
         if inverse_alt is not None:
@@ -387,7 +433,7 @@ See rcParams.keys() for a list of valid parameters.' % (key,))
     # all of the validation over-ride update to force
     # through __setitem__
     def update(self, *args, **kwargs):
-        for k, v in six.iteritems(dict(*args, **kwargs)):
+        for k, v in dict(*args, **kwargs).items():
             self[k] = v
 
     def __repr__(self):
@@ -415,7 +461,7 @@ See rcParams.keys() for a list of valid parameters.' % (key,))
         """
         Return values in order of sorted keys.
         """
-        return [selzaf[k] for k in self.keys()]
+        return [self[k] for k in self.keys()]
 
     def find_all(self, pattern):
         """
@@ -444,7 +490,7 @@ def rc_params(fail_on_error=False):
         # this should never happen, default in mpl-data should always be found
         message = 'could not find rc file; returning defaults'
         ret = RcParams([(key, default) for key, (default, _) in
-                        six.iteritems(defaultParams)
+                        defaultParams.items()
                         if key not in _all_deprecated])
         warnings.warn(message)
         return ret
@@ -490,7 +536,7 @@ def _rc_params_in_file(fname, fail_on_error=False):
 
     config = RcParams()
 
-    for key, (val, line, cnt) in six.iteritems(rc_temp):
+    for key, (val, line, cnt) in rc_temp.items():
         if key in defaultParams:
             if fail_on_error:
                 config[key] = val  # try to convert to proper type or raise
@@ -530,13 +576,14 @@ def rc_params_from_file(fname, fail_on_error=False, use_default_template=True):
     if not use_default_template:
         return config_from_file
 
-    iter_params = six.iteritems(defaultParams)
+    iter_params = defaultParams.items()
     config = RcParams([(key, default) for key, (default, _) in iter_params
                                       if key not in _all_deprecated])
     config.update(config_from_file)
 
-    if underworld.rank() == 0:
+    if rank == 0:
         print('loaded rc file %s' % fname)
+        sys.stdout.flush()
 
     return config
 
@@ -551,7 +598,7 @@ def _in_doctest():
 
 # lets shoot off some usage metrics
 # send metrics *only* if we are rank=0, and if we are not running inside a doctest.
-if (underworld.rank() == 0) and not _in_doctest():
+if (rank == 0) and not _in_doctest():
     def _sendData():
         # disable collection of data if requested
         if "UW_NO_USAGE_METRICS" not in os.environ:
@@ -570,7 +617,7 @@ if (underworld.rank() == 0) and not _in_doctest():
                                       args=("runtime",
                                             "import",
                                             label,
-                                            underworld.nProcs()))
+                                            nProcs))
             thread.daemon = True
             thread.start()
 
@@ -586,16 +633,4 @@ rcParamsOrig = rcParams.copy()
 
 rcParamsDefault = defaultParams
 
-from ._model import Model, load_model
-
-scaling["[length]"] = rcParams["scaling.length"]
-scaling["[mass]"] = rcParams["scaling.mass"]
-scaling["[time]"] = rcParams["scaling.time"]
-scaling["[substance]"] = rcParams["scaling.substance"]
-scaling["[temperature]"] = rcParams["scaling.temperature"]
-
-UpperCrust_default = rcParams["rheology.default.uppercrust"]
-MidCrust_default = rcParams["rheology.default.midcrust"]
-LowerCrust_default = rcParams["rheology.default.lowercrust"]
-MantleLithosphere_default = rcParams["rheology.default.mantlelithosphere"]
-Mantle_default = rcParams["rheology.default.mantle"]
+from ._model import Model

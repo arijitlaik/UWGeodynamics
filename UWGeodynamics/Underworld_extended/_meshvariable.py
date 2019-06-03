@@ -1,11 +1,12 @@
+from __future__ import print_function,  absolute_import
 import underworld as uw
 import h5py
 import numpy as np
 import os
 from mpi4py import MPI
-from UWGeodynamics.scaling import Dimensionalize
-from UWGeodynamics.scaling import nonDimensionalize
-from UWGeodynamics.scaling import UnitRegistry as u
+from UWGeodynamics import dimensionalise
+from UWGeodynamics import non_dimensionalise
+from UWGeodynamics import UnitRegistry as u
 from UWGeodynamics.version import git_revision as __git_revision__
 
 
@@ -77,7 +78,8 @@ class MeshVariable(uw.mesh.MeshVariable):
             mesh = self.mesh
             local = mesh.nodesLocal
 
-            self.data[0:local] = dset[mesh.data_nodegId[0:local],:]
+            with dset.collective:
+                self.data[0:local] = dset[mesh.data_nodegId[0:local],:]
 
         else:
             if not interpolate:
@@ -146,9 +148,9 @@ class MeshVariable(uw.mesh.MeshVariable):
         if units:
             if units.units == "degC":
                 units = u.degK
-                self.data[:] = nonDimensionalize((self.data[:]+273.15)*units)
+                self.data[:] = non_dimensionalise((self.data[:]+273.15)*units)
             else:
-                self.data[:] = nonDimensionalize(self.data[:]*units)
+                self.data[:] = non_dimensionalise(self.data[:]*units)
 
         uw.libUnderworld.StgFEM._FeVariable_SyncShadowValues( self._cself )
         h5f.close()
@@ -204,7 +206,7 @@ class MeshVariable(uw.mesh.MeshVariable):
         True
 
         >>> # clean up:
-        >>> if uw.rank() == 0:
+        >>> if uw.mpi.rank == 0:
         ...     import os;
         ...     os.remove( "saved_mesh_variable.h5" )
 
@@ -223,9 +225,9 @@ class MeshVariable(uw.mesh.MeshVariable):
                                   dtype=self.data.dtype)
         fact = 1.0
         if units:
-            fact = Dimensionalize(1.0, units=units).magnitude
+            fact = dimensionalise(1.0, units=units).magnitude
             if units == "degC":
-                fact = Dimensionalize(1.0, units=u.degK).magnitude
+                fact = dimensionalise(1.0, units=u.degK).magnitude
             # Save unit type as attribute
             h5f.attrs['units'] = str(units)
 
@@ -236,10 +238,12 @@ class MeshVariable(uw.mesh.MeshVariable):
 
         # write to the dset using the global node ids
         local = mesh.nodesLocal
-        if units == "degC":
-            dset[mesh.data_nodegId[0:local],:] = self.data[0:local] * fact - 273.15
-        else:
-            dset[mesh.data_nodegId[0:local],:] = self.data[0:local] * fact
+
+        with dset.collective:
+            if units == "degC":
+                dset[mesh.data_nodegId[0:local],:] = self.data[0:local] * fact - 273.15
+            else:
+                dset[mesh.data_nodegId[0:local],:] = self.data[0:local] * fact
 
         # save a hdf5 attribute to the elementType used for this field - maybe useful
         h5f.attrs["elementType"] = np.string_(mesh.elementType)

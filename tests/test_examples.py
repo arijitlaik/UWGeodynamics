@@ -1,88 +1,69 @@
-import os
-import subprocess
-import tempfile
-import sys
-
-import nbformat
-
-TEST_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_DIR = os.path.abspath(os.path.join(TEST_DIR, os.pardir))
-sys.path.insert(0, PROJECT_DIR)
-
-
-def _notebook_run(path):
-    """Execute a notebook via nbconvert and collect output.
-       :returns (parsed nb object, execution errors)
-    """
-    dirname, __ = os.path.split(path)
-    os.chdir(dirname)
-    with tempfile.NamedTemporaryFile(suffix=".ipynb") as fout:
-        args = ["jupyter", "nbconvert",
-                "--to", "notebook", "--execute",
-                "--output", fout.name, path]
-        subprocess.check_call(args)
-
-        fout.seek(0)
-        nb = nbformat.read(fout, nbformat.current_nbformat)
-
-    errors = [output for cell in nb.cells if "outputs" in cell
-              for output in cell["outputs"]
-              if output.output_type == "error"]
-
-    return nb, errors
-
+from .utils import _notebook_run
 
 def test_steady_state_example():
-    path = os.path.join(
-        PROJECT_DIR,
-        "examples/1_01_Steady_State_Heat.ipynb")
-    _, errors = _notebook_run(path)
-    assert errors == []
+    _notebook_run("examples/1_01_Steady_State_Heat.ipynb")
 
 
 def test_convection_example():
-    path = os.path.join(
-        PROJECT_DIR,
-        "examples/1_02_Convection_Example.ipynb")
-    _, errors = _notebook_run(path)
-    assert errors == []
+    _notebook_run("examples/1_02_Convection_Example.ipynb")
 
 
 def test_convection_blankenbach():
-    path = os.path.join(
-        PROJECT_DIR,
-        "examples/1_03_BlankenbachBenchmark.ipynb")
-    _, errors = _notebook_run(path)
-    assert errors == []
+    _notebook_run("examples/1_03_BlankenbachBenchmark.ipynb")
 
 
 def test_stokes_sinker():
-    path = os.path.join(
-        PROJECT_DIR,
-        "examples/1_05_StokesSinker.ipynb")
-    _, errors = _notebook_run(path)
-    assert errors == []
+    _notebook_run("examples/1_05_StokesSinker.ipynb")
 
 
-def test_slab_subduction():
-    path = os.path.join(
-        PROJECT_DIR,
-        "examples/1_07_SlabSubduction.ipynb")
-    _, errors = _notebook_run(path)
-    assert errors == []
+def test_hypnic_jerk():
+    _notebook_run("examples/1_06_HypnicJerk.ipynb")
 
 
-def test_column_traction_bottom():
-    path = os.path.join(
-        PROJECT_DIR,
-        "examples/1_20_ColumnsTractionBottom.ipynb")
-    _, errors = _notebook_run(path)
-    assert errors == []
+#def test_slab_subduction():
+#    _notebook_run("examples/1_07_SlabSubduction.ipynb")
 
 
-def test_shear_bands_pure_shear():
-    path = os.path.join(
-        PROJECT_DIR,
-        "examples/2_09_ShearBandsPureShear")
-    _, errors = _notebook_run(path)
-    assert errors == []
+def test_viscoelastic_halfspace():
+    _notebook_run("examples/1_08_ViscoElasticHalfSpace.ipynb")
+
+
+def test_viscoelastic_shear():
+    _notebook_run("examples/1_09_ViscoElasticShear.ipynb")
+
+
+def test_viscoplasticity_simple_shear():
+    _notebook_run("examples/1_10_Viscoelastoplasticity-in-simple-shear.ipynb")
+
+
+#def test_stokes_sinker_3D():
+#    _notebook_run("examples/1_11_StokesSinker3D.ipynb")
+
+
+def test_columns_traction_bottom():
+    _notebook_run("examples/1_20_ColumnsTractionBottom.ipynb")
+
+
+#def test_columns_traction_bottom_3D():
+#    _notebook_run("examples/1_21_3D_ColumnsTractionBottom.ipynb")
+
+
+def test_freesurface_simple():
+    _notebook_run("examples/1_23_FreeSurface_Simple_Example.ipynb")
+
+
+#def test_define_3D_volume():
+#    _notebook_run("1_24_Define_3D_volumes.ipynb")
+
+
+def test_hot_canon_ball():
+    _notebook_run("examples/1_25_Hot_Canon_Ball.ipynb")
+
+
+def test_shear_band_pure_shear():
+   _notebook_run("examples/2_09_ShearBandsPureShear.ipynb")
+
+
+def test_rayleigh_taylor_kekken():
+   _notebook_run("examples/2_15_Rayleigh-Taylor_van_Keken_et_al_1997.ipynb")
+

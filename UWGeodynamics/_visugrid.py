@@ -1,5 +1,6 @@
+from __future__ import print_function,  absolute_import
 import underworld as uw
-from scaling import nonDimensionalize as nd
+from UWGeodynamics import non_dimensionalise as nd
 import numpy as np
 from scipy import spatial
 
@@ -21,16 +22,19 @@ class Visugrid(object):
                                              minCoord=minCoord,
                                              maxCoord=maxCoord)
 
-        boundaryNodes = (Model._left_wall + Model._right_wall +
-                         Model._top_wall + Model._bottom_wall)
+        boundaryNodes = (Model.left_wall + Model.right_wall +
+                         Model.top_wall + Model.bottom_wall)
 
         self.Model = Model
 
         # Build a KDTree to handle boundaries
         self.boundaries = boundaryNodes.data
-        x = Model.mesh.data[self.boundaries,0]
-        y = Model.mesh.data[self.boundaries,1]
-        self.tree = spatial.cKDTree(zip(x.ravel(), y.ravel()))
+        x = Model.mesh.data[self.boundaries, 0]
+        y = Model.mesh.data[self.boundaries, 1]
+        coords = np.zeros((x.size, 2))
+        coords[:, 0] = x.ravel()
+        coords[:, 1] = y.ravel()
+        self.tree = spatial.cKDTree(coords)
 
     def advect(self, dt):
 

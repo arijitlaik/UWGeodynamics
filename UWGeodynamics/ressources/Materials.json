@@ -1,33 +1,57 @@
 {
-"Upper crust":{
+"Air":{
     "density": {
-         "value": 2620.0 ,
+         "value": 1.0 ,
          "units": "kilogram / metre**3"},
+    "diffusivity": {
+         "value": 1.0e-6,
+         "units": "metre**2 / second"},
+    "capacity":{
+         "value": 100.0 ,
+         "units": "joule / kelvin / kilogram"},
+    "radiogenicHeatProd":{
+         "value": 0.0,
+         "units": "milliwatts / metre**3"},
+    "viscosity": {
+         "value": 1e19,
+         "units": "pascal * second"}
+    },
+"Sticky Air":{
+    "density": {
+         "value": 1.0 ,
+         "units": "kilogram / metre**3"},
+    "diffusivity": {
+         "value": 1.0e-6,
+         "units": "metre**2 / second"},
+    "capacity":{
+         "value": 100.0 ,
+         "units": "joule / kelvin / kilogram"},
+    "radiogenicHeatProd":{
+         "value": 0.0,
+         "units": "milliwatts / metre**3"},
+    "viscosity": {
+         "value": 1e20,
+         "units": "pascal * second"}
+    },
+"Wet Quartz Upper crust":{
+    "density": {
+         "reference_density": {
+             "value": 2620.0,
+             "units": "kilogram / metre**3"},
+         "thermalExpansivity":{
+             "value": 3e-5,
+             "units": "kelvin**-1"}},
     "diffusivity": {
          "value": 1.0e-6,
          "units": "metre**2 / second"},
     "capacity":{
          "value": 1000.0 ,
          "units": "joule / kelvin / kilogram"},
-    "thermalExpansivity":{
-         "value": 3e-5,
-         "units": "1.0 / kelvin"},
     "radiogenicHeatProd":{
          "value": 0.7,
          "units": "milliwatts / metre**3"},
-    "viscosity": null  ,
-    "plasticity": null ,
-    "solidus":  null ,
-    "liquidus": null ,
-    "latentHeatFusion":{
-         "value": 300.0,
-         "units": "kilojoules / kilogram"},
-    "meltExpansion": null ,
-    "meltFraction": null ,
-    "meltFractionLimit": null ,
-    "viscosityChangeX1": null ,
-    "viscosityChangeX2": null ,
-    "viscosityChange": null
+    "viscosity": "Wet Quartz, Viscous Dislocation Creep, Gleason and Tullis, 1995",
+    "plasticity": "Rey and Muller, 2010 (UpperCrust)"
     },
 
 
@@ -41,28 +65,14 @@
     "capacity":{
          "value": 1000.0 ,
          "units": "joule / kelvin / kilogram"},
-    "thermalExpansivity":{
-         "value": 3e-5,
-         "units": "1.0 / kelvin"},
     "radiogenicHeatProd":{
          "value": 0.6,
          "units": "milliwatts / metre**3"},
     "viscosity": null  ,
-    "plasticity": null ,
-    "solidus":  null ,
-    "liquidus": null ,
-    "latentHeatFusion":{
-         "value": 300.0,
-         "units": "kilojoules / kilogram"},
-    "meltExpansion": null ,
-    "meltFraction": null ,
-    "meltFractionLimit": null ,
-    "viscosityChangeX1": null ,
-    "viscosityChangeX2": null ,
-    "viscosityChange": null
+    "plasticity": null
     },
 
-"Lower crust":{
+"Wet Quartz Lower crust":{
     "density": {
          "value": 2800.0 ,
          "units": "kilogram / metre**3"},
@@ -72,25 +82,11 @@
     "capacity":{
          "value": 1000.0 ,
          "units": "joule / kelvin / kilogram"},
-    "thermalExpansivity":{
-         "value": 3e-5,
-         "units": "1.0 / kelvin"},
     "radiogenicHeatProd":{
          "value": 0.4,
          "units": "milliwatts / metre**3"},
-    "viscosity": null  ,
-    "plasticity": null ,
-    "solidus":  null ,
-    "liquidus": null ,
-    "latentHeatFusion":{
-         "value": 300.0,
-         "units": "kilojoules / kilogram"},
-    "meltExpansion": null ,
-    "meltFraction": null ,
-    "meltFractionLimit": null ,
-    "viscosityChangeX1": null ,
-    "viscosityChangeX2": null ,
-    "viscosityChange": null
+    "viscosity": "Wet Quartz, Viscous Dislocation Creep, Goetze et al., 1978" ,
+    "plasticity": "Rey and Muller, 2010 (LowerCrust)"
     },
 
 "Oceanic crust":{
@@ -103,28 +99,14 @@
     "capacity":{
          "value": 1000.0 ,
          "units": "joule / kelvin / kilogram"},
-    "thermalExpansivity":{
-         "value": 3e-5,
-         "units": "1.0 / kelvin"},
     "radiogenicHeatProd":{
          "value": 0.0,
          "units": "milliwatts / metre**3"},
     "viscosity": null  ,
-    "plasticity": null ,
-    "solidus":  null ,
-    "liquidus": null ,
-    "latentHeatFusion":{
-         "value": 300.0,
-         "units": "kilojoules / kilogram"},
-    "meltExpansion": null ,
-    "meltFraction": null ,
-    "meltFractionLimit": null ,
-    "viscosityChangeX1": null ,
-    "viscosityChangeX2": null ,
-    "viscosityChange": null
+    "plasticity": null
     },
 
-"Lithospheric Mantle":{
+"Dry Olivine Lithospheric Mantle":{
     "density": {
          "value": 3370.0 ,
          "units": "kilogram / metre**3"},
@@ -134,29 +116,15 @@
     "capacity":{
          "value": 1000.0 ,
          "units": "joule / kelvin / kilogram"},
-    "thermalExpansivity":{
-         "value": 3e-5,
-         "units": "1.0 / kelvin"},
     "radiogenicHeatProd":{
          "value": 0.02,
          "units": "milliwatts / metre**3"},
-    "viscosity": null  ,
-    "plasticity": null ,
-    "solidus":  null ,
-    "liquidus": null ,
-    "latentHeatFusion":{
-         "value": 300.0,
-         "units": "kilojoules / kilogram"},
-    "meltExpansion": null ,
-    "meltFraction": null ,
-    "meltFractionLimit": null ,
-    "viscosityChangeX1": null ,
-    "viscosityChangeX2": null ,
-    "viscosityChange": null
+    "viscosity": "Dry Olivine, Viscous Dislocation Creep, Karato and Wu, 1990",
+    "plasticity": "Rey and Muller, 2010 (LithosphericMantle)"
     },
 
 
-"Asthenosphere":{
+"Dry Olivine Asthenosphere":{
     "density": {
          "value": 3395.0 ,
          "units": "kilogram / metre**3"},
@@ -166,25 +134,10 @@
     "capacity":{
          "value": 1000.0 ,
          "units": "joule / kelvin / kilogram"},
-    "thermalExpansivity":{
-         "value": 3e-5,
-         "units": "1.0 / kelvin"},
     "radiogenicHeatProd":{
          "value": 0.7,
          "units": "milliwatts / metre**3"},
-    "viscosity": null  ,
-    "plasticity": null ,
-    "solidus":  null ,
-    "liquidus": null ,
-    "latentHeatFusion":{
-         "value": 300.0,
-         "units": "kilojoules / kilogram"},
-    "meltExpansion": null ,
-    "meltFraction": null ,
-    "meltFractionLimit": null ,
-    "viscosityChangeX1": null ,
-    "viscosityChangeX2": null ,
-    "viscosityChange": null
+    "viscosity": "Dry Olivine, Viscous Dislocation Creep, Karato and Wu, 1990"
     }
 
 }
