@@ -11,6 +11,9 @@ from UWGeodynamics import UnitRegistry as u
 from mpi4py import MPI as _MPI
 from tempfile import gettempdir
 
+from scipy.linalg import solve as linSolve
+import scipy.signal as sig
+
 comm = _MPI.COMM_WORLD
 rank = comm.rank
 size = comm.size
@@ -557,8 +560,7 @@ class BasicHillSlopeDiffsuion2d(object):
             # boundary between two cpus, there velocity is reduced
             if len(tmp) > 0:
                 # import ipdb; ipdb.set_trace()
-                print 'hgn', tmp, self.gridt[0:2, tmp], np.squeeze(
-                    self.gridt[0:2, tmp]).T
+                print ('hgn', tmp, self.gridt[0:2, tmp],np.squeeze(self.gridt[0:2, tmp]).T)
                 if len(tmp) == 1:
                     tmp2 = velocityField.evaluate((self.gridt[0, tmp][0],
                                                    self.gridt[1, tmp][0]))
@@ -701,7 +703,7 @@ class BasicHillSlopeDiffsuion2d(object):
                   "Processing surface with BasicHillSlopeDiffsuion2d" + endcol)
 
         self.SurfaceVeloEval(mesh=self.mesh, velocityField=self.velocityField)
-        self.gridt[3:5, :] = comm.allreduce(self.gridt[3:5, :], op=MPI.SUM)
+        self.gridt[3:5, :] = comm.allreduce(self.gridt[3:5, :], op=_MPI.SUM)
 
         comm.barrier()
         if comm.rank == 0:
