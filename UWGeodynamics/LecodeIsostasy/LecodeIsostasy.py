@@ -1,29 +1,59 @@
+from __future__ import print_function,  absolute_import
 import underworld as uw
 import numpy as np
 from mpi4py import MPI
 from scipy.interpolate import interp1d, interp2d
+from UWGeodynamics._material import Material
 
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
 
 
 class LecodeIsostasy(object):
+    """LecodeIsostasy"""
 
     def __init__(self, reference_mat=None, average=False,
                  surface=None, maskedMat=None,
                  vertical_walls_conditions=None):
+        """LecodeIsostasy Init Method
+
+        Parameters
+        ----------
+
+        reference_mat : reference material at the base of the Model
+                        (The Material that enters or leaves the Model
+                         to account for isostasy)
+        average : (bool) if True, calculate an average velocity at the base of the Model.
+        surface : (optional) Initial position of the surface of the material columns. The
+                  top of the Model is used by default and should be fine in most cases.
+        maskedMat : (optional) Mask a material or a list of materials.
+                    The masked material will not interfere in the calculation of the densities.
+        vertical_walls_conditions : (optional) Existing boundary conditions on the
+                                    lateral walls.
+
+        Returns
+        -------
+
+        GEO.LecodeIsostasy object.
+
+        """
 
         self.mesh = None
         self.swarm = None
         self._mesh_advector = None
         self.velocityField = None
-        self.boundariesField = None
         self._densityFn = None
         self.materialIndexField = None
+
+        if not isinstance(reference_mat, Material):
+            raise ValueError("""reference_mat must be a Material, index of
+                             Material has been deprecated""")
+
         self.reference_mat = reference_mat
         self.average = average
         self.surface = surface
         self.maskedMat = list(maskedMat) if maskedMat else list()
+        self._maskedMatIndices = [mat.index for mat in self.maskedMat]
         self.initialized = False
 
         # Make the class aware of the conditions on the vertical walls
@@ -140,13 +170,8 @@ class LecodeIsostasy(object):
             bot_ids = base.data[base.data < self.mesh.nodesLocal]
             node_gids = self.mesh.data_nodegId[bot_ids].flatten()
             self.velocityField.data[bot_ids, 1] = basal_velocities[node_gids]
-            if self.boundariesField:
-                self.boundariesField.data[bot_ids, 1] = basal_velocities[node_gids]
 
         self.velocityField.syncronise()
-
-        if self.boundariesField:
-            self.boundariesField.syncronise()
 
     def _lecode_tools_isostasy3D(self):
 
@@ -195,14 +220,8 @@ class LecodeIsostasy(object):
             bot_ids = base.data[base.data < self.mesh.nodesLocal]
             node_gids = self.mesh.data_nodegId[bot_ids].flatten()
             self.velocityField.data[bot_ids, -1] = basal_velocities.flatten()[node_gids]
-            if self.boundariesField:
-                self.boundariesField.data[bot_ids, -1] = basal_velocities.flatten()[node_gids]
-
 
         self.velocityField.syncronise()
-
-        if self.boundariesField:
-            self.boundariesField.syncronise()
 
     def _get_sep_velocities2D(self):
 
@@ -415,7 +434,7 @@ class LecodeIsostasy(object):
         particleGlobalCount = np.sum(procCount)
 
         offset = 0
-        for i in xrange(rank):
+        for i in range(rank):
             offset += procCount[i]
 
         if self.mesh.dim == 2:
@@ -502,14 +521,21 @@ class LecodeIsostasy(object):
 
         # Calculate Mean densities at the bottom
         if self.maskedMat:
-            mask = np.in1d(global_materials, self.maskedMat)
+            mask = np.in1d(global_materials, self.maskedMatIndices)
             maskedArray = np.ma.masked_array(global_densities, mask)
             botMeanDensities = maskedArray.mean(axis=0)
         else:
             botMeanDensities = np.mean(global_densities, 0)
 
         # Calculate Mean densities at the bottom (reference_mat only)
-        botMeanDensities0 = np.ma.array(global_densities, mask=(global_materials != self.reference_mat))
+        botMeanDensities0 = np.ma.array(global_densities, mask=(global_materials != self.reference_mat.index))
+        if botMeanDensities0.count() == 0:
+            raise ValueError("""I am trying hard here but it looks like you
+                             don't have any material with index {0} in your model.
+                             Please check your set up. The resolution might
+                             also be insufficient to resolve the
+                             material...""".format(self.reference_mat.name))
+
         botMeanDensities0 = botMeanDensities0.mean(axis=0)
         botMeanDensities0 = np.array(botMeanDensities0)
 
@@ -553,14 +579,20 @@ class LecodeIsostasy(object):
 
         # Calculate Mean densities at the bottom
         if self.maskedMat:
-            mask = np.in1d(global_materials, self.maskedMat)
+            mask = np.in1d(global_materials, self.maskedMatIndices)
             maskedArray = np.ma.masked_array(global_densities, mask)
             botMeanDensities = maskedArray.mean(axis=0)
         else:
             botMeanDensities = np.mean(global_densities, 0)
 
         # Calculate Mean densities at the bottom (reference_mat only)
-        botMeanDensities0 = np.ma.array(global_densities, mask=(global_materials != self.reference_mat))
+        botMeanDensities0 = np.ma.array(global_densities, mask=(global_materials != self.reference_mat.index))
+        if botMeanDensities0.count() == 0:
+            raise ValueError("""I am trying hard here but it looks like you
+                             don't have any material with index {0} in your model.
+                             Please check your set up. The resolution might
+                             also be insufficient to resolve the
+                             material...""".format(self.reference_mat.name))
         botMeanDensities0 = botMeanDensities0.mean(axis=0)
         botMeanDensities0 = np.array(botMeanDensities0)
 

@@ -1,11 +1,12 @@
+from __future__ import print_function,  absolute_import
 import underworld as uw
 import h5py
 from mpi4py import MPI
-from UWGeodynamics.scaling import Dimensionalize
-from UWGeodynamics.scaling import nonDimensionalize
-from UWGeodynamics.scaling import UnitRegistry as u
+from UWGeodynamics import dimensionalise
+from UWGeodynamics import non_dimensionalise
+from UWGeodynamics import UnitRegistry as u
 from UWGeodynamics.version import git_revision as __git_revision__
-import _meshvariable as var
+from . import _meshvariable as var
 
 class FeMesh_Cartesian(uw.mesh.FeMesh_Cartesian):
 
@@ -100,7 +101,7 @@ class FeMesh_Cartesian(uw.mesh.FeMesh_Cartesian):
         True
 
         >>> # clean up:
-        >>> if uw.rank() == 0:
+        >>> if uw.mpi.rank == 0:
         ...     import os;
         ...     os.remove( "saved_mesh.h5" )
 
@@ -116,7 +117,7 @@ class FeMesh_Cartesian(uw.mesh.FeMesh_Cartesian):
 
         fact = 1.0
         if units:
-            fact = Dimensionalize(1.0, units=units).magnitude
+            fact = dimensionalise(1.0, units=units).magnitude
             h5f.attrs['units'] = str(units)
 
         # save attributes and simple data - MUST be parallel as driver is mpio
@@ -137,7 +138,8 @@ class FeMesh_Cartesian(uw.mesh.FeMesh_Cartesian):
 
         local = self.nodesLocal
         # write to the dset using the local set of global node ids
-        dset[self.data_nodegId[0:local],:] = self.data[0:local] * fact
+        with dset.collective:
+            dset[self.data_nodegId[0:local],:] = self.data[0:local] * fact
 
         # write the element node connectivity
         globalShape = ( self.elementsGlobal, self.data_elementNodes.shape[1] )
@@ -147,7 +149,8 @@ class FeMesh_Cartesian(uw.mesh.FeMesh_Cartesian):
 
         local = self.elementsLocal
         # write to the dset using the local set of global node ids
-        dset[self.data_elgId[0:local],:] = self.data_elementNodes[0:local]
+        with dset.collective:
+            dset[self.data_elgId[0:local], :] = self.data_elementNodes[0:local]
 
         h5f.close()
 
@@ -220,12 +223,11 @@ class FeMesh_Cartesian(uw.mesh.FeMesh_Cartesian):
             raise RuntimeError("Provided data file appears to be for a different resolution mesh.")
 
         with self.deform_mesh(isRegular=h5f.attrs['regular']):
-            if units:
-                vals = dset[self.data_nodegId[0:self.nodesLocal],:]
-                test = vals * units
-                vals = nonDimensionalize(test)
-            else:
-                vals = dset[self.data_nodegId[0:self.nodesLocal],:]
-            self.data[0:self.nodesLocal] = vals
+            with dset.collective:
+                if units:
+                    self.data[0:self.nodesLocal] = non_dimensionalise(
+                        dset[self.data_nodegId[0:self.nodesLocal], :] * units)
+                else:
+                    self.data[0:self.nodesLocal] = dset[self.data_nodegId[0:self.nodesLocal], :]
 
         h5f.close()

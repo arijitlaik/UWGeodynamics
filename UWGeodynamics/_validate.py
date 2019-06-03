@@ -1,4 +1,5 @@
-from scaling import u
+from __future__ import print_function, absolute_import
+from UWGeodynamics import u
 from pint import UndefinedUnitError
 import six
 try:
@@ -75,9 +76,10 @@ def validate_int(s):
 def validate_int_or_none(s):
     if s:
         return validate_int(s)
-    if s is not None:
+    if s is None:
+        return
+    else:
         raise ValueError("Must be int or None")
-    return
 
 
 def validate_path(s):
@@ -120,6 +122,19 @@ def validate_viscosity(s):
             raise ValueError(
                 """Can not find {0} rheology in databases""".format(s))
 
+def validate_averaging(s):
+    options = {"arithmetic": 1,
+               "geometric": 0,
+               "harmonic": -1,
+               "maximum": 30,
+               "minimum": -30,
+               "root mean square": 2}
+    if s not in options.keys():
+        raise ValueError(
+            """{0} is not a valid option, valid options are {1}""".format(
+                s, options.keys()))
+
+    return options[s]
 
 validate_stringlist = _listify_validator(six.text_type)
 validate_stringlist.__doc__ = 'return a list'

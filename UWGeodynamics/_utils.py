@@ -1,16 +1,21 @@
+from __future__ import print_function,  absolute_import
 import numpy as np
 import underworld as uw
 import underworld.function as fn
-import shapefile
 import h5py
 import os
 import operator as op
-from .scaling import nonDimensionalize as nd
-from .scaling import Dimensionalize
-from .scaling import UnitRegistry as u
+from UWGeodynamics import non_dimensionalise as nd
+from UWGeodynamics import dimensionalise
+from UWGeodynamics import UnitRegistry as u
+from .Underworld_extended._utils import _swarmvarschema
 from .Underworld_extended import Swarm
 from scipy import spatial
+from mpi4py import MPI as _MPI
 
+comm = _MPI.COMM_WORLD
+rank = comm.rank
+size = comm.size
 
 class PhaseChange(object):
 
@@ -51,13 +56,32 @@ class PressureSmoother(object):
         self.Nodes2Cell.solve()
 
 
-class PassiveTracers(object):
+class PassiveTracers(Swarm):
 
-    def __init__(self, mesh, velocityField, name=None, vertices=None,
-                 particleEscape=True, shapeType="line"):
+    def __init__(self, mesh, velocityField, name=None,
+                 particleEscape=True, zOnly=False):
 
+        super(PassiveTracers, self).__init__(mesh,
+                                             particleEscape=particleEscape)
         self.name = name
+        self.velocityField = velocityField
+        self.angular_velocity = 0.5 * (self.velocityField.fn_gradient[1] -
+                                       self.velocityField.fn_gradient[2])
         self.particleEscape = particleEscape
+        self.zOnly = zOnly
+
+        self.tracked_field = list()
+
+    def _global_indices(self):
+        indices = np.arange(self.particleLocalCount)
+        ranks = np.repeat(rank, self.particleLocalCount)
+        pairs = np.array(list(zip(ranks, indices)), dtype=[("a", np.int32),
+                                                           ("b", np.int32)])
+        # Get rank
+        self.global_index = self.add_variable(dataType="long", count=1)
+        self.global_index.data[:, 0] = pairs.view(np.int64)
+
+    def add_particles_with_coordinates(self, vertices, **kwargs):
 
         for dim, _ in enumerate(vertices):
             vertices[dim] = nd(vertices[dim])
@@ -67,29 +91,42 @@ class PassiveTracers(object):
 
         for dim, _ in enumerate(vertices):
             points[:, dim] = vertices[dim]
+        vals = super(PassiveTracers,
+                     self).add_particles_with_coordinates(points,
+                                                          **kwargs)
+        self.advector = uw.systems.SwarmAdvector(
+            swarm=self,
+            velocityField=self.velocityField, order=2)
 
-        self.swarm = Swarm(mesh=mesh, particleEscape=particleEscape)
-        self.swarm.add_particles_with_coordinates(points)
-        self.advector = uw.systems.SwarmAdvector(swarm=self.swarm,
-                                                 velocityField=velocityField,
-                                                 order=2)
-        indices = np.arange(self.swarm.particleLocalCount)
-        rank = uw.rank()
-        ranks = np.repeat(rank, self.swarm.particleLocalCount)
-        pairs = np.array(list(zip(ranks, indices)), dtype=[("a", np.int32),
-                                                           ("b", np.int32)])
-        # Get rank
-        self.global_index = self.swarm.add_variable(dataType="long", count=1)
-        self.global_index.data[:, 0] = pairs.view(np.int64)
-
-        self.tracked_field = list()
+        self._global_indices()
+        return vals
 
     def integrate(self, dt, **kwargs):
         """ Integrate swarm velocity in time """
-        self.advector.integrate(dt, **kwargs)
+        if self.zOnly:
+            saved_velocities = np.copy(self.velocityField.data)
+            self.velocityField.data[:, :-1] = 0.
+            self.velocityField.syncronise()
+            self.advector.integrate(dt, **kwargs)
+            self.velocityField.data[...] = saved_velocities
+            self.velocityField.syncronise()
+        else:
+            self.advector.integrate(dt, **kwargs)
+
+        # Integrate tracked field variables over time
+        for field in self.tracked_field:
+            if field["timeIntegration"]:
+                obj = getattr(self, field["name"])
+                if self.mesh.dim == 2 and obj.data.shape[-1] > 2:
+                    ang_vel = self.angular_velocity
+                    dtheta = dt * ang_vel.evaluate(self).reshape(1, -1)
+                    rotateTensor2D(obj.data[:, 0:3], dtheta)
+                    obj.data[:, 0:3] += field["value"].evaluate(self)
+                else:
+                    obj.data[...] += field["value"].evaluate(self) * dt
 
     def add_tracked_field(self, value, name, units, dataType, count=1,
-                          overwrite=True):
+                          overwrite=True, timeIntegration=False):
         """ Add a field to be tracked """
         if not isinstance(value, fn.Function):
             raise ValueError("%s is not an Underworld function")
@@ -105,44 +142,20 @@ class PassiveTracers(object):
                     field["units"] = units
                     field["value"] = value
                     field["dataType"] = dataType
-                    setattr(self, name, self.swarm.add_variable(dataType, count=count))
+                    field["timeIntegration"] = timeIntegration
+                    svar = self.add_variable(dataType, count=count)
+                    svar.data[...] = 0.
+                    setattr(self, name, svar)
                     return
 
-        self.tracked_field.append({"value":value,
+        self.tracked_field.append({"value": value,
                                    "name": name,
                                    "units": units,
+                                   "timeIntegration": timeIntegration,
                                    "dataType": dataType})
-        setattr(self, name, self.swarm.add_variable(dataType, count=count))
-
-    def write_to_shapefile(self, filename, units=None, overwrite=False):
-
-        if os.path.exists(filename) and not overwrite:
-            r = shapefile.Reader(filename)
-            w = shapefile.Writer(r.shapeType)
-            # Copy over the existing dbf fields
-            w.fields = list(r.fields)
-            # Copy over the existing dbf records
-            w.records.extend(r.records())
-            # Copy over the existing polygons
-            w._shapes.extend(r.shapes())
-
-        else:
-
-            w = shapefile.Writer(shapeType=shapefile.POLYLINEZ)
-            w.field("name", "C")
-            w.field("units", "C")
-
-        fact = 1.0
-        if units:
-            fact = Dimensionalize(1.0, units=units)
-            fact = fact.magnitude
-
-        x = self.swarm.particleCoordinates.data[:,0] * fact
-        y = self.swarm.particleCoordinates.data[:,1] * fact
-        line = zip(x,y)
-        w.poly(parts=[line])
-        w.record(self.name, str(units))
-        w.save(filename)
+        svar = self.add_variable(dataType, count=count)
+        svar.data[...] = 0.
+        setattr(self, name, svar)
 
     def save(self, outputDir, checkpointID, time):
         """ Save to h5 and create an xdmf file for each tracked field """
@@ -150,20 +163,28 @@ class PassiveTracers(object):
         # Save the swarm
         swarm_fname = self.name + '-%s.h5' % checkpointID
         swarm_fpath = os.path.join(outputDir, swarm_fname)
-        sH = self.swarm.save(swarm_fpath, units=u.kilometers)
 
-        filename = self.name + '-%s.xdmf' % checkpointID
-        filename = os.path.join(outputDir, filename)
+        sH = super(PassiveTracers, self).save(
+            swarm_fpath, units=u.kilometers, time=time)
 
-        # First write the XDMF header
-        string = uw.utils._xdmfheader()
-        string += uw.utils._swarmspacetimeschema(sH, swarm_fname, time.magnitude)
+        if rank == 0:
+            filename = self.name + '-%s.xdmf' % checkpointID
+            filename = os.path.join(outputDir, filename)
+
+            # First write the XDMF header
+            string = uw.utils._xdmfheader()
+            string += uw.utils._swarmspacetimeschema(sH, swarm_fname, time)
+
+        comm.Barrier()
 
         # Save global index
         file_prefix = os.path.join(
             outputDir, self.name + '_global_index-%s' % checkpointID)
         handle = self.global_index.save('%s.h5' % file_prefix)
-        string += uw.utils._swarmvarschema(handle, "global_index")
+
+        if rank == 0:
+            string += _swarmvarschema(handle, "global_index")
+        comm.Barrier()
 
         # Save each tracked field
         for field in self.tracked_field:
@@ -173,102 +194,34 @@ class PassiveTracers(object):
                 self.name + "_" + field["name"] + '-%s' % checkpointID)
 
             obj = getattr(self, field["name"])
-            obj.data[...] = field["value"].evaluate(self.swarm)
+            if not field["timeIntegration"]:
+                obj.data[...] = field["value"].evaluate(self)
             handle = obj.save('%s.h5' % file_prefix, units=field["units"])
 
-            # Add attribute to xdmf file
-            string += uw.utils._swarmvarschema(handle, field["name"])
+            if rank == 0:
+                # Add attribute to xdmf file
+                string += _swarmvarschema(handle, field["name"])
+
+        comm.Barrier()
 
         # get swarm parameters - serially read from hdf5 file to get size
-        h5f = h5py.File(name=swarm_fpath, mode="r")
-        dset = h5f.get('data')
-        if dset == None:
-            raise RuntimeError("Can't find 'data' in file '{}'.\n".format(swarm_fname))
-        globalCount = len(dset)
-        dim = self.swarm.mesh.dim
-        h5f.close()
 
-        string += "\t<Attribute Type=\"Scalar\" Center=\"Node\" Name=\"Coordinates\">\n"
-        string += """\t\t\t<DataItem Format=\"HDF\" NumberType=\" Float\"
-                     Precision=\"8\" Dimensions=\"{0} {1}\">{2}:/data</DataItem>\n""".format(globalCount, dim, swarm_fname)
-        string += "\t</Attribute>\n"
+        if rank == 0:
+            with h5py.File(name=swarm_fpath, mode="r") as h5f:
+                dset = h5f.get('data')
+                if dset is None:
+                    raise RuntimeError("Can't find 'data' in file '{}'.\n".format(swarm_fname))
+                globalCount = len(dset)
+                dim = self.mesh.dim
 
-        # Write the footer to the xmf
-        string += uw.utils._xdmffooter()
+            # Write the footer to the xmf
+            string += uw.utils._xdmffooter()
 
-        # Write the string to file - only proc 0
-        xdmfFH = open(filename, "w")
-        xdmfFH.write(string)
-        xdmfFH.close()
-
-
-class PassiveTracersGrid(object):
-
-    def __init__(self, mesh, velocityField, name=None, vertices=None,
-                 centroids=None, particleEscape=True):
-
-        self.mesh = mesh
-        self.velocityField = velocityField
-        self.name = name
-        self.vertices = vertices
-        self.centroids = centroids
-        self.particleEscape = particleEscape
-        self.tracked_field = list()
-
-        self._sets = list()
-
-        for dim in range(len(vertices)):
-            vertices[dim] = nd(vertices[dim])
-
-        for dim in range(len(centroids)):
-            centroids[dim] = nd(centroids[dim])
-
-        if mesh.dim == 2:
-            for index, (x, y) in enumerate(zip(centroids[0], centroids[1])):
-                x_vertices = vertices[0] + x
-                y_vertices = vertices[1] + y
-                p_name = name + "-{0}".format(index)
-                self._sets.append(PassiveTracers(mesh, velocityField, p_name,
-                                                 vertices=[x_vertices,
-                                                           y_vertices],
-                                                 particleEscape=particleEscape))
-
-    def integrate(self, dt, **kwargs):
-        """ Integrate swarm velocity in time """
-        for _set in self._sets:
-            _set.advector.integrate(dt, **kwargs)
-
-    def add_tracked_field(self, value, name, units, dataType, count=1,
-                          overwrite=True):
-        """ Add a field to be tracked """
-        if not isinstance(value, fn.Function):
-            raise ValueError("%s is not an Underworld function")
-
-        # Check that the tracer does not exist already
-        for field in self.tracked_field:
-            if (name == field["name"]) or (value == field["value"]):
-                if not overwrite:
-                    raise ValueError(""" %s name already exist or already tracked
-                                     with a different name """ % name)
-                else:
-
-                    for _set in self._sets:
-                        field["name"] = name
-                        field["units"] = units
-                        field["value"] = value
-                        field["dataType"] = dataType
-                        setattr(_set, name, _set.swarm.add_variable(dataType, count=count))
-                    return
-
-        self.tracked_field.append({"value":value,
-                                   "name": name,
-                                   "units": units,
-                                   "dataType": dataType})
-
-        for _set in self._sets:
-            setattr(_set, name, _set.swarm.add_variable(dataType, count=count))
-
-        return
+            # Write the string to file - only proc 0
+            xdmfFH = open(filename, "w")
+            xdmfFH.write(string)
+            xdmfFH.close()
+        comm.Barrier()
 
 
 class Balanced_InflowOutflow(object):
@@ -376,69 +329,32 @@ class Balanced_InflowOutflow(object):
         return velocity
 
 
-class MoveImporter(object):
-
-    def __init__(self, filename, units):
-
-        self.filename = filename
-        self.shapes = self.records()
-        self.units = units
-        self.attributes = None
-        self.extent = None
-        self.names = []
-
-        xmin = float('inf') * units
-        xmax = -float('inf') * units
-        ymin = float('inf') * units
-        ymax = -float('inf') * units
-
-        _, self.filetype = os.path.splitext(filename)
-
-        for record in self.records():
-            self.names.append(record["properties"]["Name"])
-            if record["extent"][0][0].magnitude < xmin.magnitude:
-                xmin = record["extent"][0][0]
-            if record["extent"][0][1].magnitude > xmax.magnitude:
-                xmax = record["extent"][0][1]
-            if record["extent"][1][0].magnitude < ymin.magnitude:
-                ymin = record["extent"][1][0]
-            if record["extent"][1][1].magnitude > ymax.magnitude:
-                ymax = record["extent"][1][1]
-
-        self.names = np.unique(self.names)
-
-        self.xmin = xmin
-        self.xmax = xmax
-        self.ymin = ymin
-        self.ymax = ymax
-
-        self.coords = [(xmin, ymin), (xmax, ymax)]
-
-        self.generator = self.records()
-
-    def records(self):
-
-        if self.units:
-            units = self.units
-        else:
-            units = u.dimensionless
-
-        reader = shapefile.Reader(self.filename)
-        fields = reader.fields[1:]
-        field_names = [field[0] for field in fields]
-
-        for sr in reader.shapeRecords():
-            atr = dict(zip(field_names, sr.record))
-            coords = np.array(sr.shape.points)
-            coords[:,-1] = sr.shape.z
-            xextent = (coords[:,0].min(), coords[:,0].max())
-            yextent = (coords[:,1].min(), coords[:,1].max())
-            yield dict(coordinates=coords * units, properties=atr,
-                       extent=[xextent * units, yextent * units])
-
-
 def circles_grid(radius, minCoord, maxCoord, npoints=72):
+    """ This function creates a set of circles using passive tracers
 
+    Parameters
+    ----------
+
+        radius :
+            radius of the circles
+        minCoord :
+            minimum coordinates defining the extent of the grid
+        maxCoord :
+            maximum coordinates defining the extent of the grid
+        npoints :
+            number of points used to draw each circle.
+
+    example
+    -------
+
+    >>> import UWGeodynamics as GEO
+    >>> u = GEO.u
+
+    >>> x_c, y_c = GEO.circles_grid(radius = 2.0 * u.kilometer,
+    ...                 minCoord=[Model.minCoord[0], 20. * u.kilometer],
+    ...                 maxCoord=[Model.maxCoord[0], 40. * u.kilometer])
+
+    """
 
     if len(minCoord) == 2:
         # Create points on circle
@@ -448,15 +364,21 @@ def circles_grid(radius, minCoord, maxCoord, npoints=72):
         y = radius * np.sin(np.radians(angles))
 
         # Calculate centroids
-        xc = np.arange(nd(minCoord[0]), nd(maxCoord[0]) + radius, 2.*radius)
-        yc = np.arange(nd(minCoord[1]) + radius, nd(maxCoord[1]), 2.*radius * np.sqrt(3)/2.)
+        xc = np.arange(nd(minCoord[0]), nd(maxCoord[0]) + radius, 2. * radius)
+        yc = np.arange(nd(minCoord[1]) + radius, nd(maxCoord[1]), 2. * radius * np.sqrt(3) / 2.)
         xc, yc = np.meshgrid(xc, yc)
         # Shift every other row by radius
-        xc[::2,:] = xc[::2, :] + radius
+        xc[::2, :] = xc[::2, :] + radius
 
         # Calculate coordinates of all circles points
-        points = np.array(zip(xc.ravel(), yc.ravel()))[:, np.newaxis] + np.array(zip(x, y))
-        x, y = points[:,:,0].ravel(), points[:,:,1].ravel()
+        points = np.zeros((xc.size, 2))
+        points[:, 0] = xc.ravel()
+        points[:, 1] = yc.ravel()
+        coords = np.zeros((x.size, 2))
+        coords[:, 0] = x
+        coords[:, 1] = y
+        points = points[:, np.newaxis] + coords
+        x, y = points[:, :, 0].ravel(), points[:, :, 1].ravel()
 
         return x, y
 
@@ -477,17 +399,25 @@ def circles_grid(radius, minCoord, maxCoord, npoints=72):
         zc = np.arange(nd(minCoord[2]) + radius, nd(maxCoord[2]) + radius, 2. * radius * np.sqrt(3)/2.)
         xc, yc, zc = np.meshgrid(xc, yc, zc)
         # Shift every other row by radius
-        yc[:,::2,:] += radius
-        zc[::2,:,:] += radius
+        yc[:, ::2, :] += radius
+        zc[::2, :, :] += radius
 
         # Calculate coordinates of all circles points
-        points = np.array(zip(xc.ravel(), yc.ravel(), zc.ravel()))[:, np.newaxis] + np.array(zip(x, y, z))
-        x = points[:,:,0].ravel()
-        y = points[:,:,1].ravel()
-        z = points[:,:,2].ravel()
-
+        points = np.zeros((xc.size, 3))
+        points[:, 0] = xc.ravel()
+        points[:, 1] = yc.ravel()
+        points[:, 2] = zc.ravel()
+        coords = np.zeros((x.size, 3))
+        coords[:, 0] = x
+        coords[:, 1] = y
+        coords[:, 2] = y
+        points = points[:, np.newaxis] + coords
+        x = points[:, :, 0].ravel()
+        y = points[:, :, 1].ravel()
+        z = points[:, :, 2].ravel()
 
         return x, y, z
+
 
 def circle_points_tracers(radius, centre=tuple([0., 0.]), npoints=72):
     angles = np.linspace(0, 360, npoints)
@@ -495,6 +425,7 @@ def circle_points_tracers(radius, centre=tuple([0., 0.]), npoints=72):
     x = radius * np.cos(np.radians(angles)) + nd(centre[0])
     y = radius * np.sin(np.radians(angles)) + nd(centre[1])
     return x, y
+
 
 def sphere_points_tracers(radius, centre=tuple([0., 0., 0.]), npoints=30):
     theta = np.linspace(0, 180, npoints)
@@ -513,9 +444,9 @@ def sphere_points_tracers(radius, centre=tuple([0., 0., 0.]), npoints=30):
     return x, y, z
 
 
-class Nearest_neigbhors_projector(object):
+class Nearest_neighbors_projector(object):
 
-    def __init__(self, mesh, swarm, swarm_variable, mesh_variable, dtype):
+    def __init__(self, mesh, swarm, swarm_variable, mesh_variable):
         self.mesh = mesh
         self.swarm = swarm
         self.swarm_variable = swarm_variable
@@ -558,31 +489,13 @@ def fn_Tukey_window(r, centre, width, top, bottom):
     return x_conditions * y_conditions
 
 
-class NonLinearBlock(object):
-    def __init__(self, string):
-        self.string = string
-        self.data = dict()
-        self.data["Pressure Solve times"] = self.get_vals(["Pressure Solve"], 3)
-        self.data["Final V Solve times"] = self.get_vals(["Final V Solve"], 4)
-        self.data["Total BSSCR times"] = self.get_vals(["Total BSSCR Linear solve time"], 5)
-        self.data["Residuals"] = self.get_vals(["converged", "Residual", "Tolerance"], 5, func=str)
-        self.data["Residuals"] = [float(val[:-1]) for val in self.data["Residuals"]]
-        self.data["Iterations"] = self.get_vals(["Non linear solver - iteration"], -1, func=int)
-        self.data["Solution Time"] = self.get_vals(["solution time"], 5)
-
-
-    def get_vals(self, FINDSTRING, pos, func=float):
-        f = self.string.splitlines()
-        vals = [func(line.split()[pos]) for line in f if all([F.lower() in line.lower() for F in FINDSTRING])]
-        return vals
-
-
 class MovingWall(object):
 
     def __init__(self, velocity):
 
         self._Model = None
         self._wall = None
+        self._time = None
 
         self.velocity = velocity
         self.material = None
@@ -612,6 +525,11 @@ class MovingWall(object):
     @Model.setter
     def Model(self, value):
         self._Model = value
+        self._time = fn.misc.constant(self._Model._ndtime)
+        self._Model._rebuild_solver = True
+        self._Model.post_solve_functions["MovingWall"] = (
+            self.update_material_field
+        )
         self.wall_init_pos = {"left": value.minCoord[0],
                          "right": value.maxCoord[0],
                          "front": value.minCoord[1],
@@ -620,17 +538,17 @@ class MovingWall(object):
                          "top": value.maxCoord[-1]}
 
         if value.mesh.dim == 2:
-            self.wall_options = {value._left_wall: "left",
-                                 value._right_wall: "right",
-                                 value._top_wall: "top",
-                                 value._bottom_wall: "bottom"}
+            self.wall_options = {value.left_wall: "left",
+                                 value.right_wall: "right",
+                                 value.top_wall: "top",
+                                 value.bottom_wall: "bottom"}
         else:
-            self.wall_options = {value._left_wall: "left",
-                                 value._right_wall: "right",
-                                 value._front_wall: "front",
-                                 value._back_wall: "back",
-                                 value._top_wall: "top",
-                                 value._bottom_wall: "bottom"}
+            self.wall_options = {value.left_wall: "left",
+                                 value.right_wall: "right",
+                                 value.front_wall: "front",
+                                 value.back_wall: "back",
+                                 value.top_wall: "top",
+                                 value.bottom_wall: "bottom"}
 
         # Create a new viscous material with viscosity set to MaxViscosity:
         if not self.material:
@@ -653,7 +571,7 @@ class MovingWall(object):
         operator = self.wall_operators[self._wall]
         axis = self.wall_direction_axis[self._wall]
         pos = self.wall_init_pos[self._wall]
-        condition = [(operator(fn.input()[axis],(nd(self.Model.time) *
+        condition = [(operator(fn.input()[axis],(self._time *
                                         self.velocityFn +
                                         nd(pos))), True),
                      (True, False)]
@@ -664,65 +582,83 @@ class MovingWall(object):
 
         # Return new indexSet for the wall
         mesh = self.Model.mesh
-        swarm = self.Model.swarm
-
-        nodes = mesh.data_nodegId[self.wallFn.evaluate(mesh)]
-
-        # Update Material Field
-        condition = [(self.wallFn, self.material.index), (True, self.Model.materialField)]
-        func = fn.branching.conditional(condition)
-        self.Model.materialField.data[...] = func.evaluate(swarm)
+        nodes = np.arange(mesh.nodesLocal).astype(np.int)
+        mask = self.wallFn.evaluate(mesh)
+        mask = mask[:mesh.nodesLocal]
+        nodes = nodes[mask.flatten()]
 
         axis = self.wall_direction_axis[self.wall]
 
+        self.update_material_field()
         return nodes, axis
 
+    def update_material_field(self):
+        # Update Material Field
+        self._time.value = self.Model._ndtime
+        condition = [(self.wallFn, self.material.index), (True, self.Model.materialField)]
+        func = fn.branching.conditional(condition)
+        self.Model.materialField.data[...] = func.evaluate(self.Model.swarm)
 
-class LogFile(object):
-    def __init__(self, filename):
-        self.filename = filename
-        self.nonLinear_blocks = self.get_nonLinear_blocks()
-        self.pressure_solve_times = list()
-        for obj in self.nonLinear_blocks:
-            self.pressure_solve_times += obj.data["Pressure Solve times"]
-        self.finalV_solve_times = list()
-        for obj in self.nonLinear_blocks:
-            self.finalV_solve_times += obj.data["Final V Solve times"]
-        self.total_BSSCR_times = list()
-        for obj in self.nonLinear_blocks:
-            self.total_BSSCR_times += obj.data["Total BSSCR times"]
-        self.residuals = list()
-        for obj in self.nonLinear_blocks:
-            self.residuals += obj.data["Residuals"]
-        self.iterations = list()
-        for obj in self.nonLinear_blocks:
-            self.iterations.append(obj.data["Iterations"][-1])
-        self.solution_times = list()
-        for obj in self.nonLinear_blocks:
-            self.solution_times += obj.data["Solution Time"]
 
-    def get_nonLinear_blocks(self):
-        non_linear_blocks = list()
-        with open(self.filename, "r") as f:
-            block = ""
-            inBlock = False
-            step=0
-            for line in f:
-                if "Non linear solver" in line:
-                    inBlock = True
-                    step += 1
-                if inBlock:
-                    if "Converged" not in line:
-                        block += line
-                    else:
-                        block += line
-                        inBlock = False
-                        block = NonLinearBlock(block)
-                        non_linear_blocks.append(block)
-                        block=""
-            # Process last potentially non-converged block
-            if block:
-                block = NonLinearBlock(block)
-                non_linear_blocks.append(block)
-        self.nonLinear_blocks = non_linear_blocks
-        return self.nonLinear_blocks
+def extract_profile(field,
+                    line,
+                    nsamples=1000):
+    """ Extract values along a line
+
+    Parameters:
+        field: The field to extract the data from
+        line: list of (x,y, [z]) coordinates defining the sampling
+              line.
+        nsamples: number of sampling points
+    """
+
+    if size > 1:
+        raise NotImplementedError("""The extract_profile function will not work
+                                  in parallel""")
+
+    coords = np.array([(nd(x), nd(y)) for (x, y) in line])
+
+    x = np.linspace(coords[0, 0], coords[-1, 0], nsamples)
+
+    if coords[0, 0] == coords[-1, 0]:
+        y = np.linspace(coords[0, 1], coords[-1, 1], nsamples)
+    else:
+        from scipy import interpolate
+        f = interpolate.interp1d(coords[:, 0], coords[:, 1])
+        y = f(x)
+
+    dx = np.diff(x)
+    dy = np.diff(y)
+    distances = np.zeros(x.shape)
+    distances[1:] = np.sqrt(dx**2 + dy**2)
+    distances = np.cumsum(distances)
+
+    pts = np.array([x, y]).T
+    values = field.evaluate(pts)
+
+    return distances, values
+
+
+def rotateTensor2D(t, theta):
+    # vectorized version of
+    # t' = [Q^T] [t] [Q]
+
+    '''
+    # In the case tensor is a 2,2 numpy array. eg
+    # t  = [[10, 3],[3,5]]
+
+    Q = np.array([
+            [ np.cos(theta) , -np.sin(theta) ],
+            [ np.sin(theta) ,  np.cos(theta) ]])
+
+    x = np.matmul(t,Q)
+    return np.matmul(Q.T,x)
+    '''
+
+    # for symmetric tensor t. Using Q as above this simplifies to a 3x3
+    t_ = t.copy()
+    t_[:,0] = t[:,0]*np.cos(theta)**2 + t[:,1]*np.sin(theta)**2 + t[:,2]*np.sin(2*theta[:])
+    t_[:,1] = t[:,0]*np.sin(theta)**2 + t[:,1]*np.cos(theta)**2 - t[:,2]*np.sin(2*theta[:])
+    t_[:,2] = ( t[:,1] - t[:,0] ) *np.cos(theta[:])*np.sin(theta[:])  + t[:,2]*np.cos(2*theta[:])
+
+    return t_

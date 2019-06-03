@@ -1,0 +1,4 @@
+examples/* linguist-vendored
+benchmarks/* linguist-vendored
+tutorials/* linguist-vendored
+docs/* linguist-vendored

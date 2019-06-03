@@ -1,10 +1,11 @@
+from __future__ import print_function,  absolute_import
 import underworld as uw
 import h5py
 import numpy as np
 from mpi4py import MPI
-from UWGeodynamics.scaling import nonDimensionalize
-from UWGeodynamics.scaling import UnitRegistry as u
-import _swarmvariable as svar
+from UWGeodynamics import non_dimensionalise
+from UWGeodynamics import UnitRegistry as u
+from . import _swarmvariable as svar
 
 
 class Swarm(uw.swarm.Swarm):
@@ -55,7 +56,7 @@ class Swarm(uw.swarm.Swarm):
         """
         return svar.SwarmVariable( self, dataType, count )
 
-    def save(self, filename, units=None, time=None):
+    def save(self, filename, collective=False, units=None, time=None):
         """
         Save the swarm to disk.
 
@@ -73,7 +74,7 @@ class Swarm(uw.swarm.Swarm):
 
         Notes
         -----
-        This method must be called collectively by all processes.
+        This method must be called collectively by all processes
 
         Example
         -------
@@ -109,11 +110,11 @@ class Swarm(uw.swarm.Swarm):
             raise TypeError("Expected filename to be provided as a string")
 
         # just save the particle coordinates SwarmVariable
-        self.particleCoordinates.save(filename, units=units, time=time)
+        self.particleCoordinates.save(filename, collective, units=units, time=time)
 
         return uw.utils.SavedFileData( self, filename )
 
-    def load( self, filename, try_optimise=True, verbose=False):
+    def load( self, filename, collective=False, try_optimise=True, verbose=False ):
         """
         Load a swarm from disk. Note that this must be called before any SwarmVariable
         members are loaded.
@@ -185,15 +186,16 @@ class Swarm(uw.swarm.Swarm):
         if try_optimise:
             procCount = h5f.attrs.get('proc_offset')
             if procCount is not None and nProcs == len(procCount):
-                for p_i in xrange(rank):
+                for p_i in range(rank):
                     offset += procCount[p_i]
                 size = procCount[rank]
 
         valid = np.zeros(0, dtype='i') # array for read in
-        chunk=int(1e4) # read in this many points at a time
+        chunk=int(2e7) # read in this many points at a time
 
+        firstChunk = True
         (multiples, remainder) = divmod( size, chunk )
-        for ii in xrange(multiples+1):
+        for ii in range(multiples+1):
             # setup the points to begin and end reading in
             chunkStart = offset + ii*chunk
             if ii == multiples:
@@ -203,14 +205,26 @@ class Swarm(uw.swarm.Swarm):
             else:
                 chunkEnd = chunkStart + chunk
 
-            # add particles to swarm, ztmp is the corresponding local array
-            # non-local particles are not added and their ztmp index is -1
-            if units:
-                vals = nonDimensionalize(dset[ chunkStart : chunkEnd] * units)
-                ztmp = self.add_particles_with_coordinates(vals)
+            # Add particles to swarm, ztmp is the corresponding local array
+            # non-local particles are not added and their ztmp index is -1.
+            # Note that for the first chunk, we do collective read, as this
+            # is the only time that we can guaranteed that all procs will
+            # take part, and usually most (if not all) particles are loaded
+            # in this step.
+            if firstChunk and collective:
+                with dset.collective:
+                    if units:
+                        vals = non_dimensionalise(dset[ chunkStart : chunkEnd] * units)
+                        ztmp = self.add_particles_with_coordinates(vals)
+                    else:
+                        ztmp = self.add_particles_with_coordinates(dset[ chunkStart : chunkEnd ])
+                    firstChunk = False
             else:
-                ztmp = self.add_particles_with_coordinates(dset[ chunkStart : chunkEnd ])
-
+                if units:
+                    vals = non_dimensionalise(dset[ chunkStart : chunkEnd] * units)
+                    ztmp = self.add_particles_with_coordinates(vals)
+                else:
+                    ztmp = self.add_particles_with_coordinates(dset[ chunkStart : chunkEnd ])
             tmp = np.copy(ztmp) # copy because ztmp is 'readonly'
 
             # slice out -neg bits and make the local indices global

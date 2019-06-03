@@ -1,35 +1,104 @@
+from __future__ import print_function,  absolute_import
 from itertools import count
 from copy import copy
 from collections import OrderedDict
 import json
 import pkg_resources
-from .scaling import u
+from UWGeodynamics import u
 from ._utils import PhaseChange
 from ._rheology import ConstantViscosity
 from ._density import ConstantDensity
+from pint.errors import DimensionalityError
+from ._density import LinearDensity
+
+_dim_density = {'[mass]': 1.0, '[length]': -3.0}
+_dim_diffusivity = {'[length]': 2.0, '[time]': -1.0}
+_dim_capacity = {'[length]': 2.0, '[temperature]': -1.0, '[time]': -2.0}
+_dim_radiogenicHeatProduction = {'[length]': -1.0, '[mass]': 1.0, '[time]': -3.0}
+_dim_viscosity = {'[length]': -1.0, '[mass]': 1.0, '[time]': -1.0}
+_dim_stress = {'[length]': -1.0, '[mass]': 1.0, '[time]': -2.0}
+_dim_rate = {'[time]': -1.0}
+
 
 
 class Material(object):
+    """ Material class object """
+
     _ids = count(0)
 
-    def __init__(self, name="Undefined", density=0.0,
-                 diffusivity=None, capacity=None,
-                 radiogenicHeatProd=0.0, shape=None, viscosity=None,
-                 plasticity=None, elasticity=None, solidus=None, liquidus=None,
-                 minViscosity=None, maxViscosity=None, stressLimiter=None,
+    @u.check([None, None, _dim_density, _dim_diffusivity, _dim_capacity,
+              _dim_radiogenicHeatProduction, None, None, None, _dim_viscosity,
+              _dim_viscosity, _dim_stress, _dim_rate, None, None, None,
+              None, None, None, None, None, None])
+    def __init__(self, name="Undefined", shape=None,
+                 density=0.*u.kilogram/u.metre**3, diffusivity=None,
+                 capacity=None, radiogenicHeatProd=0.0*u.microwatt/u.meter**3,
+                 initial_viscosity=None, viscosity=None,
+                 plasticity=None, elasticity=None,
+                 minViscosity=None, maxViscosity=None,
+                 stressLimiter=None, healingRate=0.0 / u.year,
+                 solidus=None, liquidus=None,
                  latentHeatFusion=0.0, meltExpansion=0.0, meltFraction=0.0,
                  meltFractionLimit=1.0, viscosityChangeX1=0.15,
-                 viscosityChangeX2=0.3, viscosityChange=1.0,
-                 healingRate=0.0 / u.year):
+                 viscosityChangeX2=0.3, viscosityChange=1.0):
+        """Create a Material
 
-        self.index = self._ids.next()
+        Parameters
+        ----------
+
+        name : Name of the Material
+        shape : Shape defining the space occupied by the material.
+        density : Density (volumetric mass) of the material ([Mass]/[Length]**3)
+        diffusivity : Diffusivity ([Length]**2 / [Time])
+        capacity : Capacity ([Length]**2 / [Temperature] / [Time]**2)
+        radiogenicHeatProd : Radiogenic Heat Production Value ([Mass]/[Length]/[Time])
+        viscosity : Viscous Law or Value ([Mass]/[Length]/[Time])
+        plasticity : Plastic Law
+        elasticity : Elastic Law
+        minViscosity : Minimum viscosity allowed for the material
+        maxViscosity : Maximum viscosity allowed for the materil
+        stressLimiter : Maximum stress allowed for the material
+        healingRate : Plastic Strain Healing Rate ([Time]**(-1)]
+
+        # Melt Related parameters:
+
+        solidus : UWGeodynamics.Solidus object defining a Solidus
+        liquidus : UWGeodynamics.Liquidus object defining a Liquidus
+        latentHeatFusion : Latent Heat of Fusion (enthalpie)
+        meltExpansion : Melt expansion
+        meltFraction : Initial Fraction of Melt
+        meltFractionLimit : Maximum Fraction of Melt (0-1)
+
+        ## Change in viscosity associated to the presence of melt:
+
+        viscosityChange is a factor representing a linear
+        change in viscosity over a melt fraction interval
+        (ViscosityChangeX1 -- ViscosityChangeX2)
+
+        viscosityChange : Viscosity Change Factor
+        viscosityChangeX1 : Start of the viscosity change interval
+        viscosityChangeX2 : End of the viscosity change interval
+
+        Returns
+        -------
+
+        A UWGeodynamics.Material class object.
+
+        Example
+        -------
+
+        >>> import UWGeodynamics as GEO
+        >>> crust = GEO.Material(name="Crust")
+
+        """
+
+        self.index = next(self._ids)
 
         self.name = name
         self.top = None
         self.bottom = None
 
         self.shape = shape
-        self._density = None
         self.density = density
         self.referenceDensity = self.density
         self.diffusivity = diffusivity
@@ -56,11 +125,15 @@ class Material(object):
 
         self._viscosity = None
         self.viscosity = viscosity
+        self._initial_viscosity = None
+        self.initial_viscosity = initial_viscosity
+        self._plasticity = None
         self.plasticity = plasticity
 
         self.elasticity = elasticity
         self.healingRate = healingRate
         self._phase_changes = list()
+        self.Model = None
 
     def _repr_html_(self):
         return _material_html_repr(self)
@@ -74,10 +147,26 @@ class Material(object):
 
     @viscosity.setter
     def viscosity(self, value):
-        if isinstance(value, (u.Quantity, float)):
-            self._viscosity = ConstantViscosity(value)
+        self._viscosity = _process_viscosity_value(value)
+
+    @property
+    def initial_viscosity(self):
+        return self._initial_viscosity
+
+    @initial_viscosity.setter
+    def initial_viscosity(self, value):
+        self._initial_viscosity = _process_viscosity_value(value)
+
+    @property
+    def plasticity(self):
+        return self._plasticity
+
+    @plasticity.setter
+    def plasticity(self, value):
+        if isinstance(value, str):
+            self._plasticity = get_plasticity_from_registry(value)
         else:
-            self._viscosity = value
+            self._plasticity = value
 
     @property
     def density(self):
@@ -85,15 +174,19 @@ class Material(object):
 
     @density.setter
     def density(self, value):
-        if isinstance(value, (u.Quantity, float)):
-            self._density = ConstantDensity(value)
-        else:
+        if isinstance(value, LinearDensity):
             self._density = value
             self._thermalExpansivity = value.thermalExpansivity
+        else:
+            self._density = ConstantDensity(value)
 
     @property
     def thermalExpansivity(self):
         return self._thermalExpansivity
+
+    @thermalExpansivity.setter
+    def thermalExpansivity(self, value):
+        self._thermalExpansivity = value
 
     def add_melt_modifier(self, solidus, liquidus, latentHeatFusion,
                           meltExpansion,
@@ -158,10 +251,14 @@ def _material_html_repr(Material):
         value = str(Material.density.name)
         html += "<tr><td>{0}</td><td>{1}</td></tr>".format(key, value)
 
-    for key, val in _default.iteritems():
+    for key, val in _default.items():
         value = Material.__dict__.get(val)
         if value is None:
-            value = Material.__dict__.get("_"+val)
+            value = Material.__dict__.get("_" + val)
+        if value is None and Material.Model:
+            value = Material.Model.__dict__.get(val)
+        if value is None and Material.Model:
+            value = Material.Model.__dict__.get("_" + val)
         html += "<tr><td>{0}</td><td>{1}</td></tr>".format(key, value)
 
     if Material.viscosity and Material.plasticity:
@@ -184,32 +281,59 @@ def _material_html_repr(Material):
     if Material.plasticity:
         html += "<tr><td>{0}</td><td>{1}</td></tr>".format(
             "Plasticity", Material.plasticity.name)
+    if not Material.viscosity and not Material.plasticity:
+        html += "<tr><td></td><td>{0}</td></tr>".format(
+            "None")
 
     return header + html + footer
 
+
 class MaterialRegistry(object):
+    """ Library of commonly used Materials """
 
     def __init__(self, filename=None):
+        """Create a registry of materials
+
+        Parameters
+        ----------
+
+        filename : (optional) filename of the json file
+                   database.
+
+        Returns
+        -------
+
+        An UWGeodynamics MaterialRegistry Class
+        """
 
         if not filename:
-            filename = pkg_resources.resource_filename(__name__, "ressources/Materials.json")
+            filename = pkg_resources.resource_filename(
+                __name__, "ressources/Materials.json")
+
+        def get_value(item):
+            value = item["value"]
+            units = item["units"]
+            if units != "None":
+                return u.Quantity(value, units)
+            else:
+                return value
 
         with open(filename, "r") as infile:
             _materials = json.load(infile)
 
         self._dir = {}
-        for material, parameters in _materials.iteritems():
+        for material, parameters in _materials.items():
             name = material.replace(" ", "_").replace(",", "").replace(".", "")
             name = name.replace(")", "").replace("(", "")
 
-            for key in parameters.keys():
-                if parameters[key] is not None:
-                    value = parameters[key]["value"]
-                    units = parameters[key]["units"]
-                    if units != "None":
-                        parameters[key] = u.Quantity(value, units)
-                    else:
-                        parameters[key] = value
+            for key, item in parameters.items():
+                if isinstance(item, dict):
+                    if "value" in item.keys():
+                        parameters[key] = get_value(item)
+                    elif ("thermalExpansivity" or "beta") in item.keys():
+                        for prop in item.keys():
+                            item[prop] = get_value(item[prop])
+                        parameters[key] = LinearDensity(**item)
 
             self._dir[name] = Material(name=material, **parameters)
 
@@ -220,3 +344,65 @@ class MaterialRegistry(object):
     def __getattr__(self, item):
         # Make sure to return a new instance of ViscousCreep
         return copy(self._dir[item])
+
+
+def _process_viscosity_value(value):
+    """ Process the value assign to the viscosity attribute """
+    if isinstance(value, (u.Quantity, float)):
+        # Check dimensionality
+        if (isinstance(value, u.Quantity) and
+           value.dimensionality != _dim_viscosity):
+            _dim_vals = u.get_dimensionality(_dim_viscosity)
+            raise DimensionalityError(value, 'a quantity of',
+                                      value.dimensionality,
+                                      _dim_vals)
+
+        return ConstantViscosity(value)
+    elif isinstance(value, str):
+        return get_viscosity_from_registry(value)
+    else:
+        return value
+
+
+def get_viscosity_from_registry(rheology_name):
+    """Get Viscosity from default registry
+
+    Parameters
+    ----------
+
+    rheology_name : Name of the rheology
+
+    Returns
+    -------
+
+    An UWGeodynamics ViscousCreepRheology object.
+    """
+
+    from UWGeodynamics import ViscousCreepRegistry
+    rh = ViscousCreepRegistry()
+    name = rheology_name.replace(",", "").replace(".", "")
+    name = [word.strip() for word in name.split()
+            if word.lower() not in ["viscous", "creep"]]
+    name = "_".join(name)
+    return rh._dir[name]
+
+
+def get_plasticity_from_registry(plasticity_name):
+    """Get plasticity from default plasticity registry
+
+    Parameters
+    ----------
+
+    plasticity_name : Name of the plasticity reference
+
+    Returns
+    -------
+
+    An UWGeodynamics DruckerPrager object
+    """
+
+    from UWGeodynamics import PlasticityRegistry
+    pl = PlasticityRegistry()
+    name = plasticity_name.replace(" ", "_").replace(",", "").replace(".", "")
+    name = name.replace(")", "").replace("(", "")
+    return pl._dir[name]

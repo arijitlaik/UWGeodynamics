@@ -1,11 +1,13 @@
 # Include the license file
 include LICENSE.txt
 include uwgeodynamicsrc.template  
+recursive-include utils *.sh
+recursive-include UWGeodynamics/ressources *.json
+recursive-include UWGeodynamics/uwgeo-data *
 
-# Include the data files
-recursive-include data *
-recursive-include docs *
-recursive-include manual *
-recursive-include examples *
-recursive-include tutorials *
-recursive-include ressources *
+prune docs
+prune manual
+prune examples
+prune tutorials
+prune docker
+prune docker-dev
